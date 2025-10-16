@@ -23,6 +23,8 @@
 
 use pixels::{Error, Pixels, SurfaceTexture};
 use rand::Rng;
+use rand::rngs::SmallRng;
+use rand::SeedableRng;
 use std::collections::{VecDeque, HashSet};
 use std::time::{Duration, Instant};
 use std::fs;
@@ -157,6 +159,19 @@ impl Game {
         } else {
             if let Some(tail) = self.snake.pop_back() {
                 self.snake_set.remove(&tail);
+            }
+        }
+        if ultra_fast {
+            // Ultra-fast: no render during training
+            clear_rgba(frame, 10, 10, 15, 255);
+        } else if show_only_best {
+            // Force render only the best agent regardless of speed
+            clear_rgba(frame, 10, 10, 15, 255);
+            if let Some(best_game_idx) = evo.scores.iter().enumerate().max_by_key(|(_, score)| *score).map(|(idx, _)| idx) {
+                if best_game_idx < evo.pop.len() && best_game_idx < evo.games.len() {
+                    let agent_color = evo.pop[best_game_idx].color;
+                    draw_game_transparent(frame, &evo.games[best_game_idx], 220, agent_color);
+                }
             }
         }
     }
@@ -295,7 +310,7 @@ impl QAgent {
     fn get_qs(&mut self, s: u32) -> &mut [f32;3] { self.q.entry(s).or_insert([0.0, 0.0, 0.0]) }
 
     /// Select an action index {0:left, 1:straight, 2:right} using epsilon-greedy policy.
-    fn select_action(&mut self, s: u32, rng: &mut rand::rngs::ThreadRng) -> usize {
+    fn select_action<R: Rng + ?Sized>(&mut self, s: u32, rng: &mut R) -> usize {
         if rng.r#gen::<f32>() < self.epsilon { rng.gen_range(0..3) } else {
             let qs = *self.get_qs(s);
             if qs[0] >= qs[1] && qs[0] >= qs[2] { 0 } else if qs[1] >= qs[2] { 1 } else { 2 }
@@ -689,7 +704,7 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
 // Мутирует цвет с небольшим изменением
 /// Slightly mutate an RGB color by ±`range` per channel (clamped to 0..255).
 fn mutate_color(color: (u8, u8, u8), range: i32) -> (u8, u8, u8) {
-    let mut rng = rand::thread_rng();
+    let mut rng: SmallRng = SmallRng::from_entropy();
     let r = (color.0 as i32 + rng.gen_range(-range..=range)).clamp(0, 255) as u8;
     let g = (color.1 as i32 + rng.gen_range(-range..=range)).clamp(0, 255) as u8;
     let b = (color.2 as i32 + rng.gen_range(-range..=range)).clamp(0, 255) as u8;
@@ -732,7 +747,7 @@ fn state_key(game: &Game) -> u32 {
             1 // стена/граница = опасность
         } else {
             let pos = Pos::new(check_x, check_y);
-            if game.snake.iter().any(|&s| s == pos) {
+            if game.snake_set.contains(&pos) {
                 1 // тело змеи = опасность
             } else if pos == game.apple {
                 2 // яблоко
@@ -825,6 +840,14 @@ fn main() -> Result<(), Error> {
     let mut evo_steps_per_frame: u32 = 1; // начальная скорость = 1 шаг за кадр (медленно для наблюдения)
     let mut panel_visible: bool = true; // panel visibility toggle
     let mut frame_counter: u32 = 0; // counter for skipping frames
+    // Evolution step budget to spread very large step counts across ticks
+    let mut evo_pending_steps: u32 = 0;
+    let mut max_steps_per_tick: u32 = 1500; // cap work per tick to keep UI responsive
+    let mut ultra_fast: bool = false; // training ultra-fast mode (disable render, raise cap)
+    // FPS counter state
+    let mut fps_last: Instant = Instant::now();
+    let mut fps_frames: u32 = 0;
+    let mut fps_value: f32 = 0.0;
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Poll;
@@ -834,9 +857,12 @@ fn main() -> Result<(), Error> {
             
             // Draw the appropriate game(s)
             if evo.training {
-                // At very high speeds (20K+), skip game rendering entirely for maximum performance
-                if evo_steps_per_frame < 20_000 {
-                    // Draw all individuals semi-transparently
+                // Rendering strategy tuned for performance at high EVO speeds
+                if ultra_fast {
+                    // Ultra-fast: no render during training
+                    clear_rgba(frame, 10, 10, 15, 255);
+                } else if evo_steps_per_frame < 8_192 {
+                    // Low/medium speed: draw grid + agents
                     clear_rgba(frame, 30, 30, 40, 255);
                     // Draw grid first
                     for y in 0..GRID_HEIGHT {
@@ -857,24 +883,31 @@ fn main() -> Result<(), Error> {
                             }
                         }
                     }
-                    
-                    // Draw all individuals only if speed is low (for better performance at high speeds)
-                    if evo_steps_per_frame < 10_000 {
+                    // Draw all individuals only when really slow; otherwise only best
+                    if evo_steps_per_frame < 4_096 {
                         for (agent, g) in evo.pop.iter().zip(evo.games.iter()) {
                             let agent_color = agent.color;
-                            draw_game_transparent(frame, g, 180, agent_color); // увеличена непрозрачность до 180
+                            draw_game_transparent(frame, g, 180, agent_color);
                         }
                     } else {
-                        // At high speeds, just draw the best performing individual
                         if let Some(best_game_idx) = evo.scores.iter().enumerate().max_by_key(|(_, score)| *score).map(|(idx, _)| idx) {
                             if best_game_idx < evo.pop.len() && best_game_idx < evo.games.len() {
                                 let agent_color = evo.pop[best_game_idx].color;
-                                draw_game_transparent(frame, &evo.games[best_game_idx], 220, agent_color); // более непрозрачный
+                                draw_game_transparent(frame, &evo.games[best_game_idx], 220, agent_color);
                             }
                         }
                     }
+                } else if evo_steps_per_frame < 20_000 {
+                    // High speed: skip grid entirely; draw best only on plain background
+                    clear_rgba(frame, 10, 10, 15, 255);
+                    if let Some(best_game_idx) = evo.scores.iter().enumerate().max_by_key(|(_, score)| *score).map(|(idx, _)| idx) {
+                        if best_game_idx < evo.pop.len() && best_game_idx < evo.games.len() {
+                            let agent_color = evo.pop[best_game_idx].color;
+                            draw_game_transparent(frame, &evo.games[best_game_idx], 220, agent_color);
+                        }
+                    }
                 } else {
-                    // At very high speeds, just show black screen (maximum performance)
+                    // Ultra-high speed: don't render agents at all
                     clear_rgba(frame, 10, 10, 15, 255);
                 }
             } else {
@@ -915,22 +948,37 @@ fn main() -> Result<(), Error> {
                 let alive_count = evo.games.iter().filter(|g| g.alive).count();
                 draw_text(frame, &format!("EPOCH: {}  ALIVE: {}/{}", evo.epoch, alive_count, evo.pop_size), panel_x + 10, panel_y + 160, 2, (220, 200, 240, 255));
                 draw_text(frame, &format!("TARGET: {}  BEST: {}", evo.target_score, evo.best_score), panel_x + 10, panel_y + 190, 2, (220, 200, 240, 255));
+                // Leader protection HUD: show when unique leader bypasses step limit
+                {
+                    let (mut top1, mut top2, mut top1_idx) = (0usize, 0usize, None::<usize>);
+                    for (i, &sc) in evo.scores.iter().enumerate() {
+                        if sc > top1 { top2 = top1; top1 = sc; top1_idx = Some(i); }
+                        else if sc > top2 { top2 = sc; }
+                    }
+                    let leader_protected = if let Some(idx) = top1_idx {
+                        (top1 > top2) && evo.games.get(idx).map(|g| g.alive).unwrap_or(false)
+                    } else { false };
+                    if leader_protected {
+                        draw_text(frame, "LEADER: protected", panel_x + 10, panel_y + 220, 2, (120, 255, 120, 255));
+                    }
+                }
                 
                 // Champion info with epoch
                 if evo.champion_score > 0 {
-                    draw_text(frame, &format!("CHAMPION: {} (epoch {})", evo.champion_score, evo.champion_epoch), panel_x + 10, panel_y + 220, 2, (255, 215, 0, 255));
+                    draw_text(frame, &format!("CHAMPION: {} (epoch {})", evo.champion_score, evo.champion_epoch), panel_x + 10, panel_y + 240, 2, (255, 215, 0, 255));
                 } else {
-                    draw_text(frame, "CHAMPION: None", panel_x + 10, panel_y + 220, 2, (255, 215, 0, 255));
+                    draw_text(frame, "CHAMPION: None", panel_x + 10, panel_y + 240, 2, (255, 215, 0, 255));
                 }
                 
                 // Stagnation warning
                 if evo.epochs_without_improvement > 0 {
                     let base_threshold = 1000 + (evo.restart_count * 500);
                     let color = if evo.epochs_without_improvement > (base_threshold - 200) { (255, 100, 100, 255) } else { (200, 200, 200, 255) };
-                    draw_text(frame, &format!("No improvement: {}/{} (restarts: {})", evo.epochs_without_improvement, base_threshold, evo.restart_count), panel_x + 10, panel_y + 250, 2, color);
+                    draw_text(frame, &format!("No improvement: {}/{} (restarts: {})", evo.epochs_without_improvement, base_threshold, evo.restart_count), panel_x + 10, panel_y + 270, 2, color);
                 }
                 
-                draw_text(frame, &format!("EVO SPD: {} steps/frame (+/-)", evo_steps_per_frame), panel_x + 10, panel_y + 280, 2, (200, 220, 255, 255));
+                let ultra_str = if ultra_fast { "ON" } else { "OFF" };
+                draw_text(frame, &format!("EVO SPD: {} steps/frame (+/-)  ULTRA (U): {}", evo_steps_per_frame, ultra_str), panel_x + 10, panel_y + 300, 2, (200, 220, 255, 255));
                 // Chart of best apples per epoch
                 draw_chart(frame, panel_x + 10, chart_y, panel_w - 20, chart_h, &evo.epoch_best);
 
@@ -948,6 +996,22 @@ fn main() -> Result<(), Error> {
                 let show_btn_h: u32 = 32;
                 draw_button(frame, show_btn_x, show_btn_y, show_btn_w, show_btn_h, "SHOW H");
             }
+
+            // Update and draw FPS counter (top-right, green)
+            fps_frames = fps_frames.wrapping_add(1);
+            let elapsed = fps_last.elapsed();
+            if elapsed.as_secs_f32() >= 1.0 {
+                fps_value = fps_frames as f32 / elapsed.as_secs_f32();
+                fps_frames = 0;
+                fps_last = Instant::now();
+            }
+            let fps_text = format!("FPS: {:.0}", fps_value);
+            let scale: u32 = 2;
+            let advance = 5*scale + scale; // glyph width + spacing
+            let text_w: u32 = fps_text.chars().count() as u32 * advance;
+            let fps_x: u32 = WIDTH.saturating_sub(text_w + 8);
+            let fps_y: u32 = 8;
+            draw_text(frame, &fps_text, fps_x, fps_y, scale, (80, 255, 120, 255));
 
             if pixels.render().is_err() {
                 *control_flow = ControlFlow::Exit;
@@ -1003,6 +1067,11 @@ fn main() -> Result<(), Error> {
             // Toggle panel visibility
             if input.key_pressed(VirtualKeyCode::H) {
                 panel_visible = !panel_visible;
+            }
+            // Ultra-fast toggle
+            if input.key_pressed(VirtualKeyCode::U) {
+                ultra_fast = !ultra_fast;
+                max_steps_per_tick = if ultra_fast { 50_000 } else { 1500 };
             }
 
             // Speed controls (keyboard)
@@ -1070,7 +1139,11 @@ fn main() -> Result<(), Error> {
                 let steps_per_frame: u32 = evo_steps_per_frame.max(1);
                 if game.paused { window.request_redraw(); return; }
                 
-                for _ in 0..steps_per_frame {
+                // Accumulate desired work and process in chunks to avoid long UI stalls
+                evo_pending_steps = evo_pending_steps.saturating_add(steps_per_frame);
+                let to_run = evo_pending_steps.min(max_steps_per_tick);
+                let mut ran_steps: u32 = 0;
+                for _ in 0..to_run {
                     let mut all_done = true;
                     let target_score = evo.target_score;
                     let len = evo.pop.len().min(evo.games.len()).min(evo.scores.len());
@@ -1088,8 +1161,8 @@ fn main() -> Result<(), Error> {
                             if !g.alive || *score_ref >= target_score {
                                 return;
                             }
-                            // local RNG per thread
-                            let mut local_rng = rand::thread_rng();
+                            // local RNG per thread (SmallRng)
+                            let mut local_rng = SmallRng::from_entropy();
                             let s = state_key(g);
                             let a_idx = agent.select_action(s, &mut local_rng);
                             g.change_dir(dir_after_action(g.dir, a_idx));
@@ -1130,28 +1203,47 @@ fn main() -> Result<(), Error> {
                             all_done = false;
                         }
                     }
-                    
+                    // Determine if there is a unique leading agent who should bypass the step limit
+                    let (mut top1, mut top2, mut top1_idx) = (0usize, 0usize, None::<usize>);
+                    for (i, &sc) in evo.scores.iter().enumerate() {
+                        if sc > top1 { top2 = top1; top1 = sc; top1_idx = Some(i); }
+                        else if sc > top2 { top2 = sc; }
+                    }
+                    let leader_protected = if let Some(idx) = top1_idx {
+                        (top1 > top2) && evo.games.get(idx).map(|g| g.alive).unwrap_or(false)
+                    } else { false };
+
                     evo.steps_taken += 1;
-                    if all_done || evo.steps_taken >= evo.step_limit {
+                    ran_steps += 1;
+                    if all_done || (evo.steps_taken >= evo.step_limit && !leader_protected) {
                         // All individuals finished or step limit reached - start new epoch
                         evo.reproduce(&mut rng, save_path);
+                        evo_pending_steps = 0; // reset pending work on epoch change
                         break;
                     }
                 }
+                // Reduce pending work by the amount actually processed
+                evo_pending_steps = evo_pending_steps.saturating_sub(ran_steps);
                 
                 // Update screen less frequently on high speeds to improve performance
                 frame_counter += 1;
-                let frames_to_skip = if evo_steps_per_frame >= 40_000 {
-                    10 // update screen every 10th iteration
+                let frames_to_skip = if ultra_fast {
+                    8
+                } else if evo_steps_per_frame >= 65_536 {
+                    20 // update screen every 20th iteration
+                } else if evo_steps_per_frame >= 40_000 {
+                    12 // every 12th
                 } else if evo_steps_per_frame >= 20_000 {
-                    5 // update screen every 5th iteration
-                } else if evo_steps_per_frame >= 10_000 {
-                    2 // update screen every 2nd iteration
+                    6 // every 6th
+                } else if evo_steps_per_frame >= 8_192 {
+                    3 // every 3rd
+                } else if evo_steps_per_frame >= 4_096 {
+                    2 // every 2nd
                 } else {
                     1 // update every iteration
                 };
                 
-                if frame_counter >= frames_to_skip {
+                if !ultra_fast && frame_counter >= frames_to_skip {
                     frame_counter = 0;
                     window.request_redraw();
                 }
