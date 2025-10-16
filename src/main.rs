@@ -23,7 +23,7 @@
 
 use pixels::{Error, Pixels, SurfaceTexture};
 use rand::Rng;
-use std::collections::{VecDeque, HashMap};
+use std::collections::{VecDeque, HashSet};
 use std::time::{Duration, Instant};
 use std::fs;
 use std::path::Path;
@@ -33,6 +33,7 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::WindowBuilder;
 use winit_input_helper::WinitInputHelper;
 use serde::{Serialize, Deserialize};
+use ahash::AHashMap;
 
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 600;
@@ -41,7 +42,7 @@ const GRID_WIDTH: u32 = WIDTH / GRID_SIZE;
 const GRID_HEIGHT: u32 = HEIGHT / GRID_SIZE;
 
 /// Integer grid position (cell coordinates).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct Pos {
     x: i32,
     y: i32,
@@ -65,6 +66,7 @@ enum Dir {
 /// Game state: snake body, apple, direction, score and flags.
 struct Game {
     snake: VecDeque<Pos>,
+    snake_set: HashSet<Pos>,
     dir: Dir,
     apple: Pos,
     alive: bool,
@@ -77,10 +79,14 @@ impl Game {
     fn new() -> Self {
         let start_x = (GRID_WIDTH / 2) as i32;
         let start_y = (GRID_HEIGHT / 2) as i32;
-        let mut snake = VecDeque::new();
-        snake.push_back(Pos::new(start_x, start_y));
-        snake.push_back(Pos::new(start_x - 1, start_y));
-        snake.push_back(Pos::new(start_x - 2, start_y));
+    let mut snake = VecDeque::new();
+    let mut snake_set = HashSet::new();
+    let p0 = Pos::new(start_x, start_y);
+    let p1 = Pos::new(start_x - 1, start_y);
+    let p2 = Pos::new(start_x - 2, start_y);
+    snake.push_back(p0); snake_set.insert(p0);
+    snake.push_back(p1); snake_set.insert(p1);
+    snake.push_back(p2); snake_set.insert(p2);
 
         let mut game = Self {
             snake,
@@ -89,6 +95,7 @@ impl Game {
             alive: true,
             score: 0,
             paused: false,
+            snake_set,
         };
         game.place_apple();
         game
@@ -101,7 +108,7 @@ impl Game {
             let x = rng.gen_range(0..GRID_WIDTH as i32);
             let y = rng.gen_range(0..GRID_HEIGHT as i32);
             let p = Pos::new(x, y);
-            if !self.snake.iter().any(|&s| s == p) {
+            if !self.snake_set.contains(&p) {
                 self.apple = p;
                 break;
             }
@@ -132,20 +139,23 @@ impl Game {
             return;
         }
 
-        // Check collision with self
-        if self.snake.iter().any(|&s| s == new_head) {
+        // Check collision with self (tail collision disallowed like before)
+        if self.snake_set.contains(&new_head) {
             self.alive = false;
             return;
         }
 
         self.snake.push_front(new_head);
+        self.snake_set.insert(new_head);
 
         // Check if apple eaten
         if new_head == self.apple {
             self.score += 1;
             self.place_apple();
         } else {
-            self.snake.pop_back();
+            if let Some(tail) = self.snake.pop_back() {
+                self.snake_set.remove(&tail);
+            }
         }
     }
 
@@ -252,7 +262,7 @@ impl Game {
 /// Simple Q-learning agent with epsilon-greedy policy.
 #[derive(Clone, Serialize, Deserialize)]
 struct QAgent {
-    q: HashMap<u32, [f32; 3]>,
+    q: AHashMap<u32, [f32; 3]>,
     epsilon: f32,
     min_epsilon: f32,
     decay: f32,
@@ -269,7 +279,7 @@ impl QAgent {
     fn new() -> Self {
         // Сбалансированные параметры для 20-битного vision
         // Дефолтный цвет - яркий зелёный (будет перезаписан при создании популяции)
-        Self { q: HashMap::new(), epsilon: 0.25, min_epsilon: 0.05, decay: 0.9992, alpha: 0.3, gamma: 0.95, steps: 0, episodes: 0, color: (100, 220, 100) }
+        Self { q: AHashMap::new(), epsilon: 0.25, min_epsilon: 0.05, decay: 0.9992, alpha: 0.3, gamma: 0.95, steps: 0, episodes: 0, color: (100, 220, 100) }
     }
     
     /// Construct an agent and set its display color.
