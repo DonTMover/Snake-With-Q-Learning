@@ -34,8 +34,6 @@ enum Dir {
     Right,
 }
 
-#[derive(Clone, Copy)]
-enum Action { Left, Straight, Right }
 
 struct Game {
     snake: VecDeque<Pos>,
@@ -216,6 +214,7 @@ impl Game {
 // Simple Q-learning Agent
 // ============================
 
+#[derive(Clone)]
 struct QAgent {
     q: HashMap<u16, [f32; 3]>,
     epsilon: f32,
@@ -223,16 +222,13 @@ struct QAgent {
     decay: f32,
     alpha: f32,
     gamma: f32,
-    enabled: bool,
-    training: bool,
-    train_steps_per_frame: u32,
     steps: u64,
     episodes: u64,
 }
 
 impl QAgent {
     fn new() -> Self {
-        Self { q: HashMap::new(), epsilon: 0.2, min_epsilon: 0.02, decay: 0.995, alpha: 0.2, gamma: 0.9, enabled: false, training: false, train_steps_per_frame: 400, steps: 0, episodes: 0 }
+        Self { q: HashMap::new(), epsilon: 0.3, min_epsilon: 0.1, decay: 0.9985, alpha: 0.4, gamma: 0.95, steps: 0, episodes: 0 }
     }
 
     fn get_qs(&mut self, s: u16) -> &mut [f32;3] { self.q.entry(s).or_insert([0.0, 0.0, 0.0]) }
@@ -256,6 +252,77 @@ impl QAgent {
         let td_target = r + gamma * next_max;
         qsa[a] = qsa[a] + alpha * (td_target - qsa[a]);
     }
+}
+
+// ============================
+// Evolutionary trainer (population of agents)
+// ============================
+
+struct EvoTrainer {
+    training: bool,
+    solved: bool,
+    pop: Vec<QAgent>,
+    pop_size: usize,
+    current: usize,
+    epoch: usize,
+    epoch_best: Vec<usize>,
+    scores: Vec<usize>,
+    step_limit: u32,
+    steps_taken: u32,
+    target_score: usize,
+    best_score: usize,
+    games: Vec<Game>, // parallel games for each individual
+}
+
+impl EvoTrainer {
+    fn new(pop_size: usize) -> Self {
+        let mut pop = Vec::with_capacity(pop_size);
+        let mut games = Vec::with_capacity(pop_size);
+        for _ in 0..pop_size { 
+            pop.push(QAgent::new());
+            games.push(Game::new());
+        }
+        let max_apples = (GRID_WIDTH as usize * GRID_HEIGHT as usize).saturating_sub(3); // 3 is initial snake length
+        Self { training: false, solved: false, pop, pop_size, current: 0, epoch: 0, epoch_best: Vec::new(), scores: vec![0; pop_size], step_limit: 3000, steps_taken: 0, target_score: max_apples, best_score: 0, games }
+    }
+
+    fn reset_epoch(&mut self) { 
+        self.current = 0; 
+        self.steps_taken = 0; 
+        self.scores.fill(0);
+        for i in 0..self.pop_size {
+            self.games[i] = Game::new();
+        }
+    }
+
+    fn reproduce(&mut self, rng: &mut rand::rngs::ThreadRng) {
+        let mut idxs: Vec<usize> = (0..self.pop_size).collect();
+        idxs.sort_by_key(|&i| std::cmp::Reverse(self.scores[i]));
+        let best_idx = *idxs.first().unwrap_or(&0);
+        let best_score = self.scores[best_idx];
+        self.epoch_best.push(best_score);
+        self.best_score = self.best_score.max(best_score);
+
+        // Keep the single best parent; fill rest with its mutated copies
+        let parent = self.pop[best_idx].clone();
+        let mut new_pop: Vec<QAgent> = Vec::with_capacity(self.pop_size);
+        new_pop.push(parent.clone());
+        while new_pop.len() < self.pop_size {
+            let mut child = parent.clone();
+            mutate_qagent(&mut child, rng, 0.25);
+            new_pop.push(child);
+        }
+        self.pop = new_pop;
+        self.epoch += 1;
+        self.reset_epoch();
+    }
+}
+
+fn mutate_qagent(agent: &mut QAgent, rng: &mut rand::rngs::ThreadRng, sigma: f32) {
+    for arr in agent.q.values_mut() {
+        for v in arr.iter_mut() { *v += rng.gen_range(-sigma..sigma); }
+    }
+    agent.epsilon = (agent.epsilon * agent.decay).max(agent.min_epsilon);
 }
 
 fn left_dir(d: Dir) -> Dir { match d { Dir::Up=>Dir::Left, Dir::Left=>Dir::Down, Dir::Down=>Dir::Right, Dir::Right=>Dir::Up } }
@@ -316,28 +383,63 @@ fn main() -> Result<(), Error> {
     };
 
     let mut game = Game::new();
-    let mut ai = QAgent::new();
+    let mut evo = EvoTrainer::new(10);
     let mut rng = rand::thread_rng();
     let mut last_update = Instant::now();
     let mut tick_duration = Duration::from_millis(150);
     let mut manual_speed_delta_ms: i32 = 0;
+    let mut evo_steps_per_frame: u32 = 1200; // evolution training speed (steps processed per frame)
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Poll;
 
         if let Event::RedrawRequested(_) = event {
             let frame = pixels.frame_mut();
-            game.draw(frame);
+            
+            // Draw the appropriate game(s)
+            if evo.training {
+                // Draw all 10 individuals semi-transparently
+                clear_rgba(frame, 20, 20, 30, 255);
+                // Draw grid first
+                for y in 0..GRID_HEIGHT {
+                    for x in 0..GRID_WIDTH {
+                        if (x + y) % 2 == 0 {
+                            let gx = x * GRID_SIZE;
+                            let gy = y * GRID_SIZE;
+                            for py in gy..gy + GRID_SIZE {
+                                for px in gx..gx + GRID_SIZE {
+                                    if px < WIDTH && py < HEIGHT {
+                                        let idx = ((py * WIDTH + px) * 4) as usize;
+                                        if idx + 3 < frame.len() {
+                                            frame[idx] = 25; frame[idx + 1] = 25; frame[idx + 2] = 35; frame[idx + 3] = 255;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Draw all individuals
+                for g in &evo.games {
+                    draw_game_transparent(frame, g, 80); // alpha 80 for semi-transparent
+                }
+            } else {
+                game.draw(frame);
+            }
 
             // Controls overlay (semi-transparent)
             let panel_x: u32 = 8;
             let panel_y: u32 = 8;
             let panel_w: u32 = 280;
-            let panel_h: u32 = 300;
+            let panel_h: u32 = 460; // increased to fit EVO status and chart
             let btn_h: u32 = 28;
             let btn_w: u32 = panel_w - 16;
             let btn_x: u32 = panel_x + 8;
-            let btn1_y: u32 = panel_y + 180; // moved further down for more spacing
+            // Chart area inside panel
+            let chart_y: u32 = panel_y + 246;
+            let chart_h: u32 = 80;
+            let btn1_y: u32 = chart_y + chart_h + 8; // start buttons after chart
             let btn2_y: u32 = btn1_y + btn_h + 6;
             let btn3_y: u32 = btn2_y + btn_h + 6;
 
@@ -347,16 +449,19 @@ fn main() -> Result<(), Error> {
             // HUD inside panel with extra line spacing
             draw_text(frame, &format!("SCORE: {}", game.score), panel_x + 10, panel_y + 34, 2, (230, 230, 230, 255));
             draw_text(frame, &format!("LENGTH: {}", game.snake.len()), panel_x + 10, panel_y + 60, 2, (200, 200, 200, 255));
-            // AI status
-            draw_text(frame, &format!("AI: {}", if ai.enabled {"ON"} else {"OFF"}), panel_x + 10, panel_y + 90, 2, (200, 240, 200, 255));
-            draw_text(frame, &format!("EPS: {:.2}", ai.epsilon), panel_x + 140, panel_y + 90, 2, (200, 240, 200, 255));
-            draw_text(frame, &format!("TRAIN: {}", if ai.training {"ON"} else {"OFF"}), panel_x + 10, panel_y + 116, 2, (220, 220, 180, 255));
             // Speed indicator (based on tick duration)
             let ms = tick_duration.as_millis() as f32;
             let sps = if ms > 0.0 { 1000.0 / ms } else { 0.0 };
-            draw_text(frame, &format!("SPEED: {} ms (~{:.1}/s)", ms as i32, sps), panel_x + 10, panel_y + 142, 2, (200, 220, 255, 255));
-            // Training progress (epochs/steps)
-            draw_text(frame, &format!("EPOCHS: {}  STEPS: {}", ai.episodes, ai.steps), panel_x + 10, panel_y + 168, 2, (210, 210, 210, 255));
+            draw_text(frame, &format!("SPEED: {} ms (~{:.1}/s)", ms as i32, sps), panel_x + 10, panel_y + 90, 2, (200, 220, 255, 255));
+
+            // Evolutionary training status
+            draw_text(frame, &format!("EVO: {} (E)", if evo.training {"ON"} else {"OFF"}), panel_x + 10, panel_y + 116, 2, (220, 200, 240, 255));
+            let alive_count = evo.games.iter().filter(|g| g.alive).count();
+            draw_text(frame, &format!("EPOCH: {}  ALIVE: {}/{}", evo.epoch, alive_count, evo.pop_size), panel_x + 10, panel_y + 142, 2, (220, 200, 240, 255));
+            draw_text(frame, &format!("TARGET: {}  BEST: {}", evo.target_score, evo.best_score), panel_x + 10, panel_y + 168, 2, (220, 200, 240, 255));
+            draw_text(frame, &format!("EVO SPD: {} steps/frame (+/-)", evo_steps_per_frame), panel_x + 10, panel_y + 194, 2, (200, 220, 255, 255));
+            // Chart of best apples per epoch
+            draw_chart(frame, panel_x + 10, chart_y, panel_w - 20, chart_h, &evo.epoch_best);
 
             let paused_label = if game.paused { "RESUME  P" } else { "PAUSE   P" };
             draw_button(frame, btn_x, btn1_y, btn_w, btn_h, paused_label);
@@ -386,15 +491,26 @@ fn main() -> Result<(), Error> {
                 game.paused = !game.paused;
             }
 
-            // AI toggles and params
-            if input.key_pressed(VirtualKeyCode::I) { ai.enabled = !ai.enabled; }
-            if input.key_pressed(VirtualKeyCode::T) { ai.training = !ai.training; if ai.training { ai.enabled = true; } }
-            if input.key_pressed(VirtualKeyCode::U) { ai.epsilon = (ai.epsilon - 0.05).max(0.0); }
-            if input.key_pressed(VirtualKeyCode::O) { ai.epsilon = (ai.epsilon + 0.05).min(1.0); }
+            // Evolution toggle only
+            if input.key_pressed(VirtualKeyCode::E) {
+                evo.training = !evo.training;
+                if evo.training {
+                    evo.solved = false; evo.reset_epoch(); evo.epoch = 0; evo.epoch_best.clear(); evo.best_score = 0; game = Game::new();
+                }
+            }
 
-            // Manual speed controls (keyboard)
-            if input.key_pressed(VirtualKeyCode::NumpadAdd) || input.key_pressed(VirtualKeyCode::Equals) { manual_speed_delta_ms = (manual_speed_delta_ms - 10).max(-150); }
-            if input.key_pressed(VirtualKeyCode::NumpadSubtract) || input.key_pressed(VirtualKeyCode::Minus) { manual_speed_delta_ms = (manual_speed_delta_ms + 10).min(300); }
+            // Speed controls (keyboard)
+            if evo.training {
+                if input.key_pressed(VirtualKeyCode::NumpadAdd) || input.key_pressed(VirtualKeyCode::Equals) {
+                    evo_steps_per_frame = (evo_steps_per_frame.saturating_mul(2)).min(10_000);
+                }
+                if input.key_pressed(VirtualKeyCode::NumpadSubtract) || input.key_pressed(VirtualKeyCode::Minus) {
+                    evo_steps_per_frame = (evo_steps_per_frame / 2).max(1);
+                }
+            } else {
+                if input.key_pressed(VirtualKeyCode::NumpadAdd) || input.key_pressed(VirtualKeyCode::Equals) { manual_speed_delta_ms = (manual_speed_delta_ms - 10).max(-150); }
+                if input.key_pressed(VirtualKeyCode::NumpadSubtract) || input.key_pressed(VirtualKeyCode::Minus) { manual_speed_delta_ms = (manual_speed_delta_ms + 10).min(300); }
+            }
 
             // Handle direction changes
             if input.key_pressed(VirtualKeyCode::Up) || input.key_pressed(VirtualKeyCode::W) {
@@ -414,66 +530,81 @@ fn main() -> Result<(), Error> {
             if let Some((mx, my)) = input.mouse() {
                 if input.mouse_pressed(0) {
                     let mx = mx as u32; let my = my as u32;
-                    let panel_x: u32 = 8; let panel_y: u32 = 8; let panel_w: u32 = 280; let btn_h: u32 = 28; let btn_w: u32 = panel_w - 16; let btn_x: u32 = panel_x + 8; let btn1_y: u32 = panel_y + 180; let btn2_y: u32 = btn1_y + btn_h + 6; let btn3_y: u32 = btn2_y + btn_h + 6;
+                    let panel_x: u32 = 8; let panel_y: u32 = 8; let panel_w: u32 = 280; let btn_h: u32 = 28; let btn_w: u32 = panel_w - 16; let btn_x: u32 = panel_x + 8; let chart_y: u32 = panel_y + 246; let chart_h: u32 = 80; let btn1_y: u32 = chart_y + chart_h + 8; let btn2_y: u32 = btn1_y + btn_h + 6; let btn3_y: u32 = btn2_y + btn_h + 6;
                     if point_in_rect(mx, my, btn_x, btn1_y, btn_w, btn_h) { game.paused = !game.paused; }
-                    else if point_in_rect(mx, my, btn_x, btn2_y, btn_w, btn_h) { manual_speed_delta_ms = (manual_speed_delta_ms - 10).max(-150); }
+                    else if point_in_rect(mx, my, btn_x, btn2_y, btn_w, btn_h) {
+                        if evo.training { evo_steps_per_frame = (evo_steps_per_frame.saturating_mul(2)).min(10_000); }
+                        else { manual_speed_delta_ms = (manual_speed_delta_ms - 10).max(-150); }
+                    }
                     else if point_in_rect(mx, my, btn_x, btn3_y, btn_w, btn_h) { game = Game::new(); tick_duration = Duration::from_millis(150); }
                 }
             }
 
-            // Training loop: run many steps per frame without waiting
-            if ai.training {
-                for _ in 0..ai.train_steps_per_frame {
-                    if !game.alive { ai.episodes += 1; game = Game::new(); }
-                    let s = state_key(&game);
-                    let a_idx = ai.select_action(s, &mut rng);
-                    game.change_dir(dir_after_action(game.dir, a_idx));
-                    let before_score = game.score; let was_alive = game.alive;
-                    let head0 = *game.snake.front().unwrap();
-                    let d0 = (game.apple.x - head0.x).abs() + (game.apple.y - head0.y).abs();
-                    game.update();
-                    let ate = game.score > before_score;
-                    let died = was_alive && !game.alive;
-                    let head1 = *game.snake.front().unwrap();
-                    let d1 = (game.apple.x - head1.x).abs() + (game.apple.y - head1.y).abs();
-                    let mut reward = if died { -10.0 } else if ate { 10.0 } else { -0.01 };
-                    if !died && !ate {
-                        if d1 < d0 { reward += 0.003; } else if d1 > d0 { reward -= 0.003; }
+            // Evolutionary training loop (population of agents - all run in parallel)
+            if evo.training {
+                let steps_per_frame: u32 = evo_steps_per_frame.max(1);
+                if game.paused { window.request_redraw(); return; }
+                
+                for _ in 0..steps_per_frame {
+                    let mut all_done = true;
+                    
+                    // Update all individuals in parallel
+                    for i in 0..evo.pop_size {
+                        let g = &mut evo.games[i];
+                        if !g.alive || evo.scores[i] >= evo.target_score {
+                            continue; // skip finished individuals
+                        }
+                        all_done = false;
+                        
+                        let agent = &mut evo.pop[i];
+                        let s = state_key(g);
+                        let a_idx = agent.select_action(s, &mut rng);
+                        g.change_dir(dir_after_action(g.dir, a_idx));
+                        let before_score = g.score;
+                        let was_alive = g.alive;
+                        let head0 = *g.snake.front().unwrap();
+                        let d0 = (g.apple.x - head0.x).abs() + (g.apple.y - head0.y).abs();
+                        g.update();
+                        let ate = g.score > before_score;
+                        let died = was_alive && !g.alive;
+                        let head1 = *g.snake.front().unwrap();
+                        let d1 = (g.apple.x - head1.x).abs() + (g.apple.y - head1.y).abs();
+                        let mut reward = if died { -10.0 } else if ate { 10.0 } else { -0.01 };
+                        if !died && !ate {
+                            if d1 < d0 { reward += 0.02; } else if d1 > d0 { reward -= 0.02; }
+                        }
+                        let ns = state_key(g);
+                        agent.learn(s, a_idx, reward, ns, died || !g.alive);
+                        agent.steps += 1;
+                        if died { 
+                            agent.episodes += 1; 
+                            agent.epsilon = (agent.epsilon * agent.decay).max(agent.min_epsilon);
+                        }
+                        if g.alive {
+                            evo.scores[i] = g.score;
+                        }
+                        if g.score >= evo.target_score {
+                            evo.solved = true;
+                            evo.training = false;
+                        }
                     }
-                    let ns = state_key(&game);
-                    ai.learn(s, a_idx, reward, ns, died || !game.alive);
-                    ai.steps += 1;
-                    if died { ai.episodes += 1; ai.epsilon = (ai.epsilon * 0.995).max(0.02); }
+                    
+                    evo.steps_taken += 1;
+                    if all_done || evo.steps_taken >= evo.step_limit {
+                        // All individuals finished or step limit reached - start new epoch
+                        evo.reproduce(&mut rng);
+                        break;
+                    }
                 }
                 window.request_redraw();
                 return;
             }
 
-            // Update game logic (real-time); if AI enabled, choose action per tick
+            // (Removed) standalone Q-learning training loop
+
+            // Update game logic (real-time); manual play only outside evolution
             if last_update.elapsed() >= tick_duration {
-                if ai.enabled && game.alive && !game.paused {
-                    let s = state_key(&game);
-                    let a_idx = ai.select_action(s, &mut rng);
-                    game.change_dir(dir_after_action(game.dir, a_idx));
-                    let before_score = game.score; let was_alive = game.alive;
-                    let head0 = *game.snake.front().unwrap();
-                    let d0 = (game.apple.x - head0.x).abs() + (game.apple.y - head0.y).abs();
-                    game.update();
-                    let ate = game.score > before_score;
-                    let died = was_alive && !game.alive;
-                    let head1 = *game.snake.front().unwrap();
-                    let d1 = (game.apple.x - head1.x).abs() + (game.apple.y - head1.y).abs();
-                    let mut reward = if died { -10.0 } else if ate { 10.0 } else { -0.01 };
-                    if !died && !ate {
-                        if d1 < d0 { reward += 0.003; } else if d1 > d0 { reward -= 0.003; }
-                    }
-                    let ns = state_key(&game);
-                    ai.learn(s, a_idx, reward, ns, died || !game.alive);
-                    ai.steps += 1;
-                    if died { ai.episodes += 1; ai.epsilon = (ai.epsilon * 0.995).max(0.02); }
-                } else {
-                    game.update();
-                }
+                game.update();
                 last_update = Instant::now();
 
                 // Combine base speed with manual delta
@@ -517,6 +648,29 @@ fn stroke_rect_rgba(frame: &mut [u8], x: u32, y: u32, w: u32, h: u32, r: u8, g: 
 
 fn fill_cell_rgb(frame: &mut [u8], grid_x: u32, grid_y: u32, r: u8, g: u8, b: u8) {
     let x=grid_x*GRID_SIZE; let y=grid_y*GRID_SIZE; fill_rect_rgba(frame, x, y, GRID_SIZE, GRID_SIZE, r,g,b,255);
+}
+
+fn fill_cell_rgba(frame: &mut [u8], grid_x: u32, grid_y: u32, r: u8, g: u8, b: u8, a: u8) {
+    let x=grid_x*GRID_SIZE; let y=grid_y*GRID_SIZE; fill_rect_rgba(frame, x, y, GRID_SIZE, GRID_SIZE, r,g,b,a);
+}
+
+fn draw_game_transparent(frame: &mut [u8], game: &Game, alpha: u8) {
+    if !game.alive { return; }
+    
+    // Draw apple semi-transparent
+    fill_cell_rgba(frame, game.apple.x as u32, game.apple.y as u32, 220, 50, 50, alpha);
+    
+    // Draw snake semi-transparent
+    for (i, &pos) in game.snake.iter().enumerate() {
+        if i == 0 {
+            // Head
+            fill_cell_rgba(frame, pos.x as u32, pos.y as u32, 100, 255, 100, alpha);
+        } else {
+            // Body with gradient
+            let brightness = 200 - (i * 10).min(100) as u8;
+            fill_cell_rgba(frame, pos.x as u32, pos.y as u32, 50, brightness, 50, alpha);
+        }
+    }
 }
 
 fn draw_button(frame: &mut [u8], x: u32, y: u32, w: u32, h: u32, label: &str) {
@@ -589,4 +743,20 @@ fn draw_char(frame: &mut [u8], ch: char, x: u32, y: u32, scale: u32, col: (u8,u8
 
 fn draw_text(frame: &mut [u8], text: &str, x: u32, y: u32, scale: u32, col: (u8,u8,u8,u8)) {
     let mut cx=x; for ch in text.chars(){ cx += draw_char(frame, ch, cx, y, scale, col); }
+}
+
+fn draw_chart(frame: &mut [u8], x: u32, y: u32, w: u32, h: u32, data: &Vec<usize>) {
+    stroke_rect_rgba(frame, x, y, w, h, 200,200,200,120);
+    if data.is_empty() { return; }
+    let max_val = *data.iter().max().unwrap_or(&1) as u32;
+    if max_val == 0 { return; }
+    let bars = data.len().min(w as usize / 6);
+    let bar_w = (w / bars as u32).max(2);
+    for i in 0..bars {
+        let v = data[data.len()-bars + i] as u32;
+        let bh = (v * (h-2)) / max_val;
+        let bx = x + 1 + i as u32 * bar_w;
+        let by = y + h - 1 - bh;
+        fill_rect_rgba(frame, bx, by, bar_w - 1, bh, 120, 180, 255, 160);
+    }
 }
