@@ -2,11 +2,14 @@ use pixels::{Error, Pixels, SurfaceTexture};
 use rand::Rng;
 use std::collections::{VecDeque, HashMap};
 use std::time::{Duration, Instant};
+use std::fs;
+use std::path::Path;
 use winit::dpi::LogicalSize;
 use winit::event::{Event, VirtualKeyCode};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::WindowBuilder;
 use winit_input_helper::WinitInputHelper;
+use serde::{Serialize, Deserialize};
 
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 600;
@@ -133,13 +136,13 @@ impl Game {
 
     fn draw(&self, frame: &mut [u8]) {
         // Clear screen with dark background
-        clear_rgba(frame, 20, 20, 30, 255);
+        clear_rgba(frame, 30, 30, 40, 255);
 
         // Draw grid
         for y in 0..GRID_HEIGHT {
             for x in 0..GRID_WIDTH {
                 if (x + y) % 2 == 0 {
-                    self.draw_rect(frame, x, y, 25, 25, 35);
+                    self.draw_rect(frame, x, y, 35, 35, 50);
                 }
             }
         }
@@ -211,10 +214,10 @@ impl Game {
 }
 
 // ============================
-// Simple Q-learning Agent
+// Simple Q-learning Agent (used inside Evolution only)
 // ============================
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct QAgent {
     q: HashMap<u16, [f32; 3]>,
     epsilon: f32,
@@ -272,6 +275,10 @@ struct EvoTrainer {
     target_score: usize,
     best_score: usize,
     games: Vec<Game>, // parallel games for each individual
+    champion: Option<QAgent>, // best agent ever found
+    champion_score: usize, // best score ever achieved
+    champion_epoch: usize, // epoch when champion was found
+    epochs_without_improvement: usize, // counter for stagnation
 }
 
 impl EvoTrainer {
@@ -283,7 +290,34 @@ impl EvoTrainer {
             games.push(Game::new());
         }
         let max_apples = (GRID_WIDTH as usize * GRID_HEIGHT as usize).saturating_sub(3); // 3 is initial snake length
-        Self { training: false, solved: false, pop, pop_size, current: 0, epoch: 0, epoch_best: Vec::new(), scores: vec![0; pop_size], step_limit: 3000, steps_taken: 0, target_score: max_apples, best_score: 0, games }
+        Self { training: false, solved: false, pop, pop_size, current: 0, epoch: 0, epoch_best: Vec::new(), scores: vec![0; pop_size], step_limit: 3000, steps_taken: 0, target_score: max_apples, best_score: 0, games, champion: None, champion_score: 0, champion_epoch: 0, epochs_without_improvement: 0 }
+    }
+
+    fn save_best(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        // Save the champion if we have one, otherwise save current best
+        let agent_to_save = if let Some(ref champ) = self.champion {
+            champ
+        } else if !self.pop.is_empty() {
+            let mut idxs: Vec<usize> = (0..self.pop_size).collect();
+            idxs.sort_by_key(|&i| std::cmp::Reverse(self.scores[i]));
+            &self.pop[*idxs.first().unwrap_or(&0)]
+        } else {
+            return Ok(());
+        };
+        let json = serde_json::to_string_pretty(agent_to_save)?;
+        fs::write(path, json)?;
+        Ok(())
+    }
+
+    fn load_best(&mut self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        if !Path::new(path).exists() { return Ok(()); }
+        let json = fs::read_to_string(path)?;
+        let agent: QAgent = serde_json::from_str(&json)?;
+        // Replace all agents with the loaded one
+        for i in 0..self.pop_size {
+            self.pop[i] = agent.clone();
+        }
+        Ok(())
     }
 
     fn reset_epoch(&mut self) { 
@@ -295,23 +329,89 @@ impl EvoTrainer {
         }
     }
 
-    fn reproduce(&mut self, rng: &mut rand::rngs::ThreadRng) {
+    fn reproduce(&mut self, rng: &mut rand::rngs::ThreadRng, save_path: &str) {
         let mut idxs: Vec<usize> = (0..self.pop_size).collect();
         idxs.sort_by_key(|&i| std::cmp::Reverse(self.scores[i]));
         let best_idx = *idxs.first().unwrap_or(&0);
         let best_score = self.scores[best_idx];
         self.epoch_best.push(best_score);
+        
+        let prev_best = self.best_score;
         self.best_score = self.best_score.max(best_score);
-
-        // Keep the single best parent; fill rest with its mutated copies
-        let parent = self.pop[best_idx].clone();
-        let mut new_pop: Vec<QAgent> = Vec::with_capacity(self.pop_size);
-        new_pop.push(parent.clone());
-        while new_pop.len() < self.pop_size {
-            let mut child = parent.clone();
-            mutate_qagent(&mut child, rng, 0.25);
-            new_pop.push(child);
+        
+        let mut new_champion = false;
+        // Update global champion if this is a new record
+        if best_score > self.champion_score {
+            self.champion_score = best_score;
+            self.champion_epoch = self.epoch;
+            self.champion = Some(self.pop[best_idx].clone());
+            self.epochs_without_improvement = 0; // reset stagnation counter
+            new_champion = true;
+            println!("🏆 NEW CHAMPION! Score: {} (Epoch {})", best_score, self.epoch);
+            
+            // Auto-save immediately when new champion found
+            if let Err(e) = self.save_best(save_path) {
+                eprintln!("Failed to save champion: {}", e);
+            } else {
+                println!("✅ Champion saved to {}", save_path);
+            }
+        } else {
+            self.epochs_without_improvement += 1;
         }
+        
+        let mut new_pop: Vec<QAgent> = Vec::with_capacity(self.pop_size);
+        
+        // Check for long stagnation (500 epochs without improvement)
+        let stagnation_threshold = 500;
+        if self.epochs_without_improvement >= stagnation_threshold && self.champion.is_some() {
+            println!("⚠️ Stagnation detected ({} epochs without improvement). Restarting with high mutation from champion...", self.epochs_without_improvement);
+            self.epochs_without_improvement = 0; // reset counter
+            
+            // Restart from champion with high mutation for diversity
+            let champion = self.champion.as_ref().unwrap();
+            new_pop.push(champion.clone()); // keep champion
+            while new_pop.len() < self.pop_size {
+                let mut child = champion.clone();
+                mutate_qagent(&mut child, rng, 0.4); // high mutation for exploration
+                new_pop.push(child);
+            }
+        }
+        // If we have a new champion, restart population from champion's children
+        else if new_champion && self.champion.is_some() {
+            let champion = self.champion.as_ref().unwrap();
+            // First agent is the champion itself (elitism)
+            new_pop.push(champion.clone());
+            // Rest are mutated versions of the champion
+            while new_pop.len() < self.pop_size {
+                let mut child = champion.clone();
+                mutate_qagent(&mut child, rng, 0.15); // moderate mutation for exploration
+                new_pop.push(child);
+            }
+        } else {
+            // Normal reproduction: top-3 elitism with adaptive mutation
+            // Increase mutation if stuck for too long
+            let base_sigma = if best_score > prev_best { 0.05 } else { 0.15 };
+            let mutation_sigma = if self.epochs_without_improvement > 100 { 
+                base_sigma + 0.1 // increase mutation if stuck
+            } else { 
+                base_sigma 
+            };
+            let top_k = 3.min(self.pop_size);
+            
+            // Elitism: keep top 3 unchanged
+            for i in 0..top_k {
+                new_pop.push(self.pop[idxs[i]].clone());
+            }
+            
+            // Fill rest with mutations from random top parents
+            while new_pop.len() < self.pop_size {
+                let parent_idx = idxs[rng.gen_range(0..top_k)];
+                let mut child = self.pop[parent_idx].clone();
+                mutate_qagent(&mut child, rng, mutation_sigma);
+                new_pop.push(child);
+            }
+        }
+        
         self.pop = new_pop;
         self.epoch += 1;
         self.reset_epoch();
@@ -384,11 +484,19 @@ fn main() -> Result<(), Error> {
 
     let mut game = Game::new();
     let mut evo = EvoTrainer::new(10);
+    
+    // Try to load saved agent
+    let save_path = "snake_agent.json";
+    if let Err(e) = evo.load_best(save_path) {
+        eprintln!("Could not load saved agent: {}", e);
+    }
+    
     let mut rng = rand::thread_rng();
     let mut last_update = Instant::now();
     let mut tick_duration = Duration::from_millis(150);
     let mut manual_speed_delta_ms: i32 = 0;
     let mut evo_steps_per_frame: u32 = 1200; // evolution training speed (steps processed per frame)
+    let mut panel_visible: bool = true; // panel visibility toggle
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Poll;
@@ -399,7 +507,7 @@ fn main() -> Result<(), Error> {
             // Draw the appropriate game(s)
             if evo.training {
                 // Draw all 10 individuals semi-transparently
-                clear_rgba(frame, 20, 20, 30, 255);
+                clear_rgba(frame, 30, 30, 40, 255);
                 // Draw grid first
                 for y in 0..GRID_HEIGHT {
                     for x in 0..GRID_WIDTH {
@@ -411,7 +519,7 @@ fn main() -> Result<(), Error> {
                                     if px < WIDTH && py < HEIGHT {
                                         let idx = ((py * WIDTH + px) * 4) as usize;
                                         if idx + 3 < frame.len() {
-                                            frame[idx] = 25; frame[idx + 1] = 25; frame[idx + 2] = 35; frame[idx + 3] = 255;
+                                            frame[idx] = 35; frame[idx + 1] = 35; frame[idx + 2] = 50; frame[idx + 3] = 255;
                                         }
                                     }
                                 }
@@ -422,51 +530,78 @@ fn main() -> Result<(), Error> {
                 
                 // Draw all individuals
                 for g in &evo.games {
-                    draw_game_transparent(frame, g, 80); // alpha 80 for semi-transparent
+                    draw_game_transparent(frame, g, 120); // alpha 120 for better visibility
                 }
             } else {
                 game.draw(frame);
             }
 
-            // Controls overlay (semi-transparent)
-            let panel_x: u32 = 8;
-            let panel_y: u32 = 8;
-            let panel_w: u32 = 280;
-            let panel_h: u32 = 460; // increased to fit EVO status and chart
-            let btn_h: u32 = 28;
-            let btn_w: u32 = panel_w - 16;
-            let btn_x: u32 = panel_x + 8;
-            // Chart area inside panel
-            let chart_y: u32 = panel_y + 246;
-            let chart_h: u32 = 80;
-            let btn1_y: u32 = chart_y + chart_h + 8; // start buttons after chart
-            let btn2_y: u32 = btn1_y + btn_h + 6;
-            let btn3_y: u32 = btn2_y + btn_h + 6;
+            // Controls overlay (semi-transparent) - only draw if visible
+            if panel_visible {
+                let panel_x: u32 = 8;
+                let panel_y: u32 = 8;
+                let panel_w: u32 = 380; // increased from 280
+                let panel_h: u32 = 590; // increased to fit new line
+                let btn_h: u32 = 32; // increased button height
+                let btn_w: u32 = panel_w - 16;
+                let btn_x: u32 = panel_x + 8;
+                // Chart area inside panel
+                let chart_y: u32 = panel_y + 310; // moved down for stagnation info
+                let chart_h: u32 = 120; // increased chart height
+                let btn1_y: u32 = chart_y + chart_h + 8; // start buttons after chart
+                let btn2_y: u32 = btn1_y + btn_h + 6;
+                let btn3_y: u32 = btn2_y + btn_h + 6;
+                let btn4_y: u32 = btn3_y + btn_h + 6;
+                let btn5_y: u32 = btn4_y + btn_h + 6; // new hide button
 
-            fill_rect_rgba(frame, panel_x, panel_y, panel_w, panel_h, 0, 0, 0, 140);
-            stroke_rect_rgba(frame, panel_x, panel_y, panel_w, panel_h, 255, 255, 255, 60);
-            draw_text(frame, "CONTROLS", panel_x + 10, panel_y + 10, 2, (180, 220, 255, 255));
-            // HUD inside panel with extra line spacing
-            draw_text(frame, &format!("SCORE: {}", game.score), panel_x + 10, panel_y + 34, 2, (230, 230, 230, 255));
-            draw_text(frame, &format!("LENGTH: {}", game.snake.len()), panel_x + 10, panel_y + 60, 2, (200, 200, 200, 255));
-            // Speed indicator (based on tick duration)
-            let ms = tick_duration.as_millis() as f32;
-            let sps = if ms > 0.0 { 1000.0 / ms } else { 0.0 };
-            draw_text(frame, &format!("SPEED: {} ms (~{:.1}/s)", ms as i32, sps), panel_x + 10, panel_y + 90, 2, (200, 220, 255, 255));
+                fill_rect_rgba(frame, panel_x, panel_y, panel_w, panel_h, 0, 0, 0, 140);
+                stroke_rect_rgba(frame, panel_x, panel_y, panel_w, panel_h, 255, 255, 255, 60);
+                draw_text(frame, "CONTROLS", panel_x + 10, panel_y + 10, 2, (180, 220, 255, 255));
+                // HUD inside panel with extra line spacing
+                draw_text(frame, &format!("SCORE: {}", game.score), panel_x + 10, panel_y + 40, 2, (230, 230, 230, 255));
+                draw_text(frame, &format!("LENGTH: {}", game.snake.len()), panel_x + 10, panel_y + 70, 2, (200, 200, 200, 255));
+                // Speed indicator (based on tick duration)
+                let ms = tick_duration.as_millis() as f32;
+                let sps = if ms > 0.0 { 1000.0 / ms } else { 0.0 };
+                draw_text(frame, &format!("SPEED: {} ms (~{:.1}/s)", ms as i32, sps), panel_x + 10, panel_y + 100, 2, (200, 220, 255, 255));
 
-            // Evolutionary training status
-            draw_text(frame, &format!("EVO: {} (E)", if evo.training {"ON"} else {"OFF"}), panel_x + 10, panel_y + 116, 2, (220, 200, 240, 255));
-            let alive_count = evo.games.iter().filter(|g| g.alive).count();
-            draw_text(frame, &format!("EPOCH: {}  ALIVE: {}/{}", evo.epoch, alive_count, evo.pop_size), panel_x + 10, panel_y + 142, 2, (220, 200, 240, 255));
-            draw_text(frame, &format!("TARGET: {}  BEST: {}", evo.target_score, evo.best_score), panel_x + 10, panel_y + 168, 2, (220, 200, 240, 255));
-            draw_text(frame, &format!("EVO SPD: {} steps/frame (+/-)", evo_steps_per_frame), panel_x + 10, panel_y + 194, 2, (200, 220, 255, 255));
-            // Chart of best apples per epoch
-            draw_chart(frame, panel_x + 10, chart_y, panel_w - 20, chart_h, &evo.epoch_best);
+                // Evolutionary training status
+                draw_text(frame, &format!("EVO: {} (E)", if evo.training {"ON"} else {"OFF"}), panel_x + 10, panel_y + 130, 2, (220, 200, 240, 255));
+                let alive_count = evo.games.iter().filter(|g| g.alive).count();
+                draw_text(frame, &format!("EPOCH: {}  ALIVE: {}/{}", evo.epoch, alive_count, evo.pop_size), panel_x + 10, panel_y + 160, 2, (220, 200, 240, 255));
+                draw_text(frame, &format!("TARGET: {}  BEST: {}", evo.target_score, evo.best_score), panel_x + 10, panel_y + 190, 2, (220, 200, 240, 255));
+                
+                // Champion info with epoch
+                if evo.champion_score > 0 {
+                    draw_text(frame, &format!("CHAMPION: {} (epoch {})", evo.champion_score, evo.champion_epoch), panel_x + 10, panel_y + 220, 2, (255, 215, 0, 255));
+                } else {
+                    draw_text(frame, "CHAMPION: None", panel_x + 10, panel_y + 220, 2, (255, 215, 0, 255));
+                }
+                
+                // Stagnation warning
+                if evo.epochs_without_improvement > 0 {
+                    let color = if evo.epochs_without_improvement > 400 { (255, 100, 100, 255) } else { (200, 200, 200, 255) };
+                    draw_text(frame, &format!("No improvement: {} epochs", evo.epochs_without_improvement), panel_x + 10, panel_y + 250, 2, color);
+                }
+                
+                draw_text(frame, &format!("EVO SPD: {} steps/frame (+/-)", evo_steps_per_frame), panel_x + 10, panel_y + 280, 2, (200, 220, 255, 255));
+                // Chart of best apples per epoch
+                draw_chart(frame, panel_x + 10, chart_y, panel_w - 20, chart_h, &evo.epoch_best);
 
-            let paused_label = if game.paused { "RESUME  P" } else { "PAUSE   P" };
-            draw_button(frame, btn_x, btn1_y, btn_w, btn_h, paused_label);
-            draw_button(frame, btn_x, btn2_y, btn_w, btn_h, "SPEED+  +");
-            draw_button(frame, btn_x, btn3_y, btn_w, btn_h, "RESTART R");
+                let paused_label = if game.paused { "RESUME  P" } else { "PAUSE   P" };
+                draw_button(frame, btn_x, btn1_y, btn_w, btn_h, paused_label);
+                draw_button(frame, btn_x, btn2_y, btn_w, btn_h, "SPEED+  +");
+                draw_button(frame, btn_x, btn3_y, btn_w, btn_h, "RESTART R");
+                draw_button(frame, btn_x, btn4_y, btn_w, btn_h, "SAVE    S");
+                draw_button(frame, btn_x, btn5_y, btn_w, btn_h, "HIDE    H");
+            } else {
+                // Draw small button to show panel again
+                let show_btn_x: u32 = 8;
+                let show_btn_y: u32 = 8;
+                let show_btn_w: u32 = 100;
+                let show_btn_h: u32 = 32;
+                draw_button(frame, show_btn_x, show_btn_y, show_btn_w, show_btn_h, "SHOW H");
+            }
 
             if pixels.render().is_err() {
                 *control_flow = ControlFlow::Exit;
@@ -495,8 +630,22 @@ fn main() -> Result<(), Error> {
             if input.key_pressed(VirtualKeyCode::E) {
                 evo.training = !evo.training;
                 if evo.training {
-                    evo.solved = false; evo.reset_epoch(); evo.epoch = 0; evo.epoch_best.clear(); evo.best_score = 0; game = Game::new();
+                    evo.solved = false; evo.reset_epoch(); evo.epoch = 0; evo.epoch_best.clear(); evo.best_score = 0; evo.epochs_without_improvement = 0; game = Game::new();
                 }
+            }
+
+            // Save agent
+            if input.key_pressed(VirtualKeyCode::S) {
+                if let Err(e) = evo.save_best(save_path) {
+                    eprintln!("Failed to save agent: {}", e);
+                } else {
+                    println!("Agent saved to {}", save_path);
+                }
+            }
+
+            // Toggle panel visibility
+            if input.key_pressed(VirtualKeyCode::H) {
+                panel_visible = !panel_visible;
             }
 
             // Speed controls (keyboard)
@@ -530,13 +679,32 @@ fn main() -> Result<(), Error> {
             if let Some((mx, my)) = input.mouse() {
                 if input.mouse_pressed(0) {
                     let mx = mx as u32; let my = my as u32;
-                    let panel_x: u32 = 8; let panel_y: u32 = 8; let panel_w: u32 = 280; let btn_h: u32 = 28; let btn_w: u32 = panel_w - 16; let btn_x: u32 = panel_x + 8; let chart_y: u32 = panel_y + 246; let chart_h: u32 = 80; let btn1_y: u32 = chart_y + chart_h + 8; let btn2_y: u32 = btn1_y + btn_h + 6; let btn3_y: u32 = btn2_y + btn_h + 6;
-                    if point_in_rect(mx, my, btn_x, btn1_y, btn_w, btn_h) { game.paused = !game.paused; }
-                    else if point_in_rect(mx, my, btn_x, btn2_y, btn_w, btn_h) {
-                        if evo.training { evo_steps_per_frame = (evo_steps_per_frame.saturating_mul(2)).min(10_000); }
-                        else { manual_speed_delta_ms = (manual_speed_delta_ms - 10).max(-150); }
+                    
+                    if panel_visible {
+                        let panel_x: u32 = 8; let panel_y: u32 = 8; let panel_w: u32 = 380; let btn_h: u32 = 32; let btn_w: u32 = panel_w - 16; let btn_x: u32 = panel_x + 8; let chart_y: u32 = panel_y + 310; let chart_h: u32 = 120; let btn1_y: u32 = chart_y + chart_h + 8; let btn2_y: u32 = btn1_y + btn_h + 6; let btn3_y: u32 = btn2_y + btn_h + 6; let btn4_y: u32 = btn3_y + btn_h + 6; let btn5_y: u32 = btn4_y + btn_h + 6;
+                        if point_in_rect(mx, my, btn_x, btn1_y, btn_w, btn_h) { game.paused = !game.paused; }
+                        else if point_in_rect(mx, my, btn_x, btn2_y, btn_w, btn_h) {
+                            if evo.training { evo_steps_per_frame = (evo_steps_per_frame.saturating_mul(2)).min(10_000); }
+                            else { manual_speed_delta_ms = (manual_speed_delta_ms - 10).max(-150); }
+                        }
+                        else if point_in_rect(mx, my, btn_x, btn3_y, btn_w, btn_h) { game = Game::new(); tick_duration = Duration::from_millis(150); }
+                        else if point_in_rect(mx, my, btn_x, btn4_y, btn_w, btn_h) {
+                            if let Err(e) = evo.save_best(save_path) {
+                                eprintln!("Failed to save agent: {}", e);
+                            } else {
+                                println!("Agent saved to {}", save_path);
+                            }
+                        }
+                        else if point_in_rect(mx, my, btn_x, btn5_y, btn_w, btn_h) {
+                            panel_visible = false;
+                        }
+                    } else {
+                        // Check if clicked on show button
+                        let show_btn_x: u32 = 8; let show_btn_y: u32 = 8; let show_btn_w: u32 = 100; let show_btn_h: u32 = 32;
+                        if point_in_rect(mx, my, show_btn_x, show_btn_y, show_btn_w, show_btn_h) {
+                            panel_visible = true;
+                        }
                     }
-                    else if point_in_rect(mx, my, btn_x, btn3_y, btn_w, btn_h) { game = Game::new(); tick_duration = Duration::from_millis(150); }
                 }
             }
 
@@ -592,7 +760,7 @@ fn main() -> Result<(), Error> {
                     evo.steps_taken += 1;
                     if all_done || evo.steps_taken >= evo.step_limit {
                         // All individuals finished or step limit reached - start new epoch
-                        evo.reproduce(&mut rng);
+                        evo.reproduce(&mut rng, save_path);
                         break;
                     }
                 }
