@@ -10,7 +10,7 @@ An interactive Snake game with an optional evolutionary Q-learning trainer. The 
 - Smooth pixel rendering with a checkerboard grid background and snake head “eyes”.
 - On-screen control panel with current score, length, speed, evolution status, epoch charts, and quick action buttons.
 - Q-learning agent with compact, vision-based state encoding (20-bit key) and three actions: turn left, go straight, turn right.
-- Evolutionary trainer running multiple agents in parallel, with elitism, mutation, and adaptive restarts on stagnation.
+- Evolutionary trainer (default population 24) running multiple agents in parallel, with elitism, mutation, and adaptive restarts on stagnation.
 - Auto-save and auto-load of the best (champion) agent to/from `snake_agent.json`.
 
 ## Controls

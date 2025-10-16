@@ -785,7 +785,7 @@ fn main() -> Result<(), Error> {
     };
 
     let mut game = Game::new();
-    let mut evo = EvoTrainer::new(10); // оптимальная популяция для 20-бит vision
+    let mut evo = EvoTrainer::new(24); // увеличенная популяция для более быстрого поиска решений
     
     // Try to load saved agent and auto-start training if found
     let save_path = "snake_agent.json";
