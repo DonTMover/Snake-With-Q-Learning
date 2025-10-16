@@ -38,6 +38,7 @@ use serde::{Serialize, Deserialize};
 use ahash::AHashMap;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
+use wgpu::{Instance, Backends, RequestAdapterOptions, PowerPreference};
 
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 600;
@@ -159,19 +160,6 @@ impl Game {
         } else {
             if let Some(tail) = self.snake.pop_back() {
                 self.snake_set.remove(&tail);
-            }
-        }
-        if ultra_fast {
-            // Ultra-fast: no render during training
-            clear_rgba(frame, 10, 10, 15, 255);
-        } else if show_only_best {
-            // Force render only the best agent regardless of speed
-            clear_rgba(frame, 10, 10, 15, 255);
-            if let Some(best_game_idx) = evo.scores.iter().enumerate().max_by_key(|(_, score)| *score).map(|(idx, _)| idx) {
-                if best_game_idx < evo.pop.len() && best_game_idx < evo.games.len() {
-                    let agent_color = evo.pop[best_game_idx].color;
-                    draw_game_transparent(frame, &evo.games[best_game_idx], 220, agent_color);
-                }
             }
         }
     }
@@ -705,6 +693,19 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
 /// Slightly mutate an RGB color by ±`range` per channel (clamped to 0..255).
 fn mutate_color(color: (u8, u8, u8), range: i32) -> (u8, u8, u8) {
     let mut rng: SmallRng = SmallRng::from_entropy();
+    // Detect GPU availability using wgpu
+    let mut gpu_available: bool = false;
+    let mut gpu_enabled: bool = false;
+    {
+        let instance = Instance::new(Backends::VULKAN | Backends::DX12 | Backends::DX11 | Backends::GL);
+        // Prefer high performance adapter
+        let options = RequestAdapterOptions { power_preference: PowerPreference::HighPerformance, compatible_surface: None, force_fallback_adapter: false };
+        if let Some(adapter) = pollster::block_on(instance.request_adapter(&options)) {
+            // Optionally check features/limits here; we just mark available
+            gpu_available = true;
+            gpu_enabled = true; // auto-enable if available
+        }
+    }
     let r = (color.0 as i32 + rng.gen_range(-range..=range)).clamp(0, 255) as u8;
     let g = (color.1 as i32 + rng.gen_range(-range..=range)).clamp(0, 255) as u8;
     let b = (color.2 as i32 + rng.gen_range(-range..=range)).clamp(0, 255) as u8;
@@ -844,6 +845,8 @@ fn main() -> Result<(), Error> {
     let mut evo_pending_steps: u32 = 0;
     let mut max_steps_per_tick: u32 = 1500; // cap work per tick to keep UI responsive
     let mut ultra_fast: bool = false; // training ultra-fast mode (disable render, raise cap)
+    let mut show_only_best: bool = false; // render only the best agent during training
+    if gpu_enabled { max_steps_per_tick = 80_000; }
     // FPS counter state
     let mut fps_last: Instant = Instant::now();
     let mut fps_frames: u32 = 0;
@@ -861,6 +864,15 @@ fn main() -> Result<(), Error> {
                 if ultra_fast {
                     // Ultra-fast: no render during training
                     clear_rgba(frame, 10, 10, 15, 255);
+                } else if show_only_best {
+                    // Always render only the best agent
+                    clear_rgba(frame, 10, 10, 15, 255);
+                    if let Some(best_game_idx) = evo.scores.iter().enumerate().max_by_key(|(_, score)| *score).map(|(idx, _)| idx) {
+                        if best_game_idx < evo.pop.len() && best_game_idx < evo.games.len() {
+                            let agent_color = evo.pop[best_game_idx].color;
+                            draw_game_transparent(frame, &evo.games[best_game_idx], 220, agent_color);
+                        }
+                    }
                 } else if evo_steps_per_frame < 8_192 {
                     // Low/medium speed: draw grid + agents
                     clear_rgba(frame, 30, 30, 40, 255);
@@ -919,7 +931,7 @@ fn main() -> Result<(), Error> {
                 let panel_x: u32 = 8;
                 let panel_y: u32 = 8;
                 let panel_w: u32 = 380; // increased from 280
-                let panel_h: u32 = 590; // increased to fit new line
+                let panel_h: u32 = 628; // increased to fit new button line
                 let btn_h: u32 = 32; // increased button height
                 let btn_w: u32 = panel_w - 16;
                 let btn_x: u32 = panel_x + 8;
@@ -930,7 +942,8 @@ fn main() -> Result<(), Error> {
                 let btn2_y: u32 = btn1_y + btn_h + 6;
                 let btn3_y: u32 = btn2_y + btn_h + 6;
                 let btn4_y: u32 = btn3_y + btn_h + 6;
-                let btn5_y: u32 = btn4_y + btn_h + 6; // new hide button
+                let btn5_y: u32 = btn4_y + btn_h + 6; // hide button
+                let btn6_y: u32 = btn5_y + btn_h + 6; // show-only-best button
 
                 fill_rect_rgba(frame, panel_x, panel_y, panel_w, panel_h, 0, 0, 0, 140);
                 stroke_rect_rgba(frame, panel_x, panel_y, panel_w, panel_h, 255, 255, 255, 60);
@@ -945,6 +958,8 @@ fn main() -> Result<(), Error> {
 
                 // Evolutionary training status
                 draw_text(frame, &format!("EVO: {} (E)", if evo.training {"ON"} else {"OFF"}), panel_x + 10, panel_y + 130, 2, (220, 200, 240, 255));
+                let gpu_str = if gpu_enabled { "GPU" } else if gpu_available { "GPU avail" } else { "CPU" };
+                draw_text(frame, &format!("ACCEL: {}  (G)", gpu_str), panel_x + 200, panel_y + 130, 2, (180, 255, 200, 255));
                 let alive_count = evo.games.iter().filter(|g| g.alive).count();
                 draw_text(frame, &format!("EPOCH: {}  ALIVE: {}/{}", evo.epoch, alive_count, evo.pop_size), panel_x + 10, panel_y + 160, 2, (220, 200, 240, 255));
                 draw_text(frame, &format!("TARGET: {}  BEST: {}", evo.target_score, evo.best_score), panel_x + 10, panel_y + 190, 2, (220, 200, 240, 255));
@@ -988,6 +1003,8 @@ fn main() -> Result<(), Error> {
                 draw_button(frame, btn_x, btn3_y, btn_w, btn_h, "RESTART R");
                 draw_button(frame, btn_x, btn4_y, btn_w, btn_h, "SAVE    S");
                 draw_button(frame, btn_x, btn5_y, btn_w, btn_h, "HIDE    H");
+                let best_label = if show_only_best { "BEST ON  B" } else { "BEST OFF B" };
+                draw_button(frame, btn_x, btn6_y, btn_w, btn_h, best_label);
             } else {
                 // Draw small button to show panel again
                 let show_btn_x: u32 = 8;
@@ -1073,6 +1090,16 @@ fn main() -> Result<(), Error> {
                 ultra_fast = !ultra_fast;
                 max_steps_per_tick = if ultra_fast { 50_000 } else { 1500 };
             }
+            // Toggle GPU acceleration mode (just adjusts training budget for now)
+            if input.key_pressed(VirtualKeyCode::G) {
+                if gpu_available {
+                    gpu_enabled = !gpu_enabled;
+                    max_steps_per_tick = if gpu_enabled { 80_000 } else { if ultra_fast { 50_000 } else { 1500 } };
+                }
+            }
+            if input.key_pressed(VirtualKeyCode::B) {
+                show_only_best = !show_only_best;
+            }
 
             // Speed controls (keyboard)
             if evo.training {
@@ -1107,7 +1134,7 @@ fn main() -> Result<(), Error> {
                     let mx = mx as u32; let my = my as u32;
                     
                     if panel_visible {
-                        let panel_x: u32 = 8; let panel_y: u32 = 8; let panel_w: u32 = 380; let btn_h: u32 = 32; let btn_w: u32 = panel_w - 16; let btn_x: u32 = panel_x + 8; let chart_y: u32 = panel_y + 310; let chart_h: u32 = 120; let btn1_y: u32 = chart_y + chart_h + 8; let btn2_y: u32 = btn1_y + btn_h + 6; let btn3_y: u32 = btn2_y + btn_h + 6; let btn4_y: u32 = btn3_y + btn_h + 6; let btn5_y: u32 = btn4_y + btn_h + 6;
+                        let panel_x: u32 = 8; let panel_y: u32 = 8; let panel_w: u32 = 380; let btn_h: u32 = 32; let btn_w: u32 = panel_w - 16; let btn_x: u32 = panel_x + 8; let chart_y: u32 = panel_y + 310; let chart_h: u32 = 120; let btn1_y: u32 = chart_y + chart_h + 8; let btn2_y: u32 = btn1_y + btn_h + 6; let btn3_y: u32 = btn2_y + btn_h + 6; let btn4_y: u32 = btn3_y + btn_h + 6; let btn5_y: u32 = btn4_y + btn_h + 6; let btn6_y: u32 = btn5_y + btn_h + 6;
                         if point_in_rect(mx, my, btn_x, btn1_y, btn_w, btn_h) { game.paused = !game.paused; }
                         else if point_in_rect(mx, my, btn_x, btn2_y, btn_w, btn_h) {
                             if evo.training { evo_steps_per_frame = (evo_steps_per_frame.saturating_mul(2)).min(100_000); } // increased max from 10_000
@@ -1123,6 +1150,9 @@ fn main() -> Result<(), Error> {
                         }
                         else if point_in_rect(mx, my, btn_x, btn5_y, btn_w, btn_h) {
                             panel_visible = false;
+                        }
+                        else if point_in_rect(mx, my, btn_x, btn6_y, btn_w, btn_h) {
+                            show_only_best = !show_only_best;
                         }
                     } else {
                         // Check if clicked on show button
