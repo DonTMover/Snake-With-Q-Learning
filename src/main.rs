@@ -472,7 +472,7 @@ fn main() -> Result<(), Error> {
     let window = WindowBuilder::new()
         .with_title("🐍 Snake Game")
         .with_inner_size(LogicalSize::new(WIDTH, HEIGHT))
-        .with_resizable(false)
+        .with_resizable(true) // allow resizing
         .build(&event_loop)
         .unwrap();
 
@@ -485,10 +485,20 @@ fn main() -> Result<(), Error> {
     let mut game = Game::new();
     let mut evo = EvoTrainer::new(10);
     
-    // Try to load saved agent
+    // Try to load saved agent and auto-start training if found
     let save_path = "snake_agent.json";
-    if let Err(e) = evo.load_best(save_path) {
+    let agent_loaded = if let Err(e) = evo.load_best(save_path) {
         eprintln!("Could not load saved agent: {}", e);
+        false
+    } else {
+        println!("✅ Loaded saved agent from {}", save_path);
+        true
+    };
+    
+    // Auto-start evolution if agent was loaded
+    if agent_loaded {
+        evo.training = true;
+        println!("🚀 Auto-starting evolution with loaded agent");
     }
     
     let mut rng = rand::thread_rng();
@@ -605,6 +615,17 @@ fn main() -> Result<(), Error> {
 
             if pixels.render().is_err() {
                 *control_flow = ControlFlow::Exit;
+            }
+        }
+
+        // Handle window resize
+        if let Event::WindowEvent { event, .. } = &event {
+            if let winit::event::WindowEvent::Resized(new_size) = event {
+                if let Err(e) = pixels.resize_surface(new_size.width, new_size.height) {
+                    eprintln!("Failed to resize surface: {}", e);
+                    *control_flow = ControlFlow::Exit;
+                    return;
+                }
             }
         }
 
