@@ -1,3 +1,26 @@
+//! Snake game with an optional evolutionary Q-learning trainer.
+//!
+//! This binary renders the classic Snake game using `pixels`/`winit` and includes
+//! an on-screen control panel. When Evolution (E) is enabled, a population of
+//! Q-learning agents is trained in parallel. The best agent (champion) is saved
+//! to `snake_agent.json` and auto-loaded on the next run.
+//!
+//! Key controls:
+//! - Arrows/WASD: move
+//! - P: pause/resume
+//! - R: restart
+//! - E: toggle evolutionary training
+//! - S: save best agent
+//! - +/-: adjust speed (manual vs. evolution modes differ)
+//! - H: show/hide control panel
+//! - Esc: quit
+//!
+//! Learning summary:
+//! - State: compact 20-bit encoding (vision of 8 cells around head + apple direction + distance bucket)
+//! - Actions: turn left, go straight, turn right
+//! - Rewards: +apple, -death, small step cost, shaping for distance improvement
+//! - Evolution: elitism, mutation, and staged restarts on stagnation
+
 use pixels::{Error, Pixels, SurfaceTexture};
 use rand::Rng;
 use std::collections::{VecDeque, HashMap};
@@ -17,6 +40,7 @@ const GRID_SIZE: u32 = 20;
 const GRID_WIDTH: u32 = WIDTH / GRID_SIZE;
 const GRID_HEIGHT: u32 = HEIGHT / GRID_SIZE;
 
+/// Integer grid position (cell coordinates).
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Pos {
     x: i32,
@@ -24,11 +48,11 @@ struct Pos {
 }
 
 impl Pos {
-    fn new(x: i32, y: i32) -> Self {
-        Self { x, y }
-    }
+    /// Construct a new grid position.
+    fn new(x: i32, y: i32) -> Self { Self { x, y } }
 }
 
+/// Snake movement direction.
 #[derive(Clone, Copy, PartialEq)]
 enum Dir {
     Up,
@@ -38,6 +62,7 @@ enum Dir {
 }
 
 
+/// Game state: snake body, apple, direction, score and flags.
 struct Game {
     snake: VecDeque<Pos>,
     dir: Dir,
@@ -48,6 +73,7 @@ struct Game {
 }
 
 impl Game {
+    /// Create a new game with a short snake centered on the grid and a random apple.
     fn new() -> Self {
         let start_x = (GRID_WIDTH / 2) as i32;
         let start_y = (GRID_HEIGHT / 2) as i32;
@@ -68,6 +94,7 @@ impl Game {
         game
     }
 
+    /// Place an apple on a random empty cell (not colliding with the snake).
     fn place_apple(&mut self) {
         let mut rng = rand::thread_rng();
         loop {
@@ -81,6 +108,7 @@ impl Game {
         }
     }
 
+    /// Advance the game by one tick: move the snake, handle apple/self/wall collisions.
     fn update(&mut self) {
         if !self.alive || self.paused {
             return;
@@ -121,6 +149,7 @@ impl Game {
         }
     }
 
+    /// Change movement direction, disallowing 180-degree turns.
     fn change_dir(&mut self, new_dir: Dir) {
         // Prevent 180 degree turns
         let opposite = match self.dir {
@@ -134,6 +163,7 @@ impl Game {
         }
     }
 
+    /// Draw the current game state to the frame buffer (RGBA8).
     fn draw(&self, frame: &mut [u8]) {
         // Clear screen with dark background
         clear_rgba(frame, 30, 30, 40, 255);
@@ -177,6 +207,7 @@ impl Game {
         // Note: Score/Length are drawn inside the overlay panel (same plane) in the RedrawRequested block
     }
 
+    /// Fill a single cell-sized rectangle at the given grid position with an RGB color.
     fn draw_rect(&self, frame: &mut [u8], grid_x: u32, grid_y: u32, r: u8, g: u8, b: u8) {
         let x = grid_x * GRID_SIZE;
         let y = grid_y * GRID_SIZE;
@@ -196,6 +227,7 @@ impl Game {
         }
     }
 
+    /// Draw simple black "eyes" on the snake head based on current direction.
     fn draw_eyes(&self, frame: &mut [u8], pos: &Pos) {
         let base_x = pos.x as u32 * GRID_SIZE;
         let base_y = pos.y as u32 * GRID_SIZE;
@@ -217,6 +249,7 @@ impl Game {
 // Simple Q-learning Agent (used inside Evolution only)
 // ============================
 
+/// Simple Q-learning agent with epsilon-greedy policy.
 #[derive(Clone, Serialize, Deserialize)]
 struct QAgent {
     q: HashMap<u32, [f32; 3]>,
@@ -232,20 +265,24 @@ struct QAgent {
 }
 
 impl QAgent {
+    /// Construct a new agent with balanced hyperparameters for the 20-bit state.
     fn new() -> Self {
         // Сбалансированные параметры для 20-битного vision
         // Дефолтный цвет - яркий зелёный (будет перезаписан при создании популяции)
         Self { q: HashMap::new(), epsilon: 0.25, min_epsilon: 0.05, decay: 0.9992, alpha: 0.3, gamma: 0.95, steps: 0, episodes: 0, color: (100, 220, 100) }
     }
     
+    /// Construct an agent and set its display color.
     fn new_with_color(r: u8, g: u8, b: u8) -> Self {
         let mut agent = Self::new();
         agent.color = (r, g, b);
         agent
     }
 
+    /// Get or initialize the Q-values array for a state key.
     fn get_qs(&mut self, s: u32) -> &mut [f32;3] { self.q.entry(s).or_insert([0.0, 0.0, 0.0]) }
 
+    /// Select an action index {0:left, 1:straight, 2:right} using epsilon-greedy policy.
     fn select_action(&mut self, s: u32, rng: &mut rand::rngs::ThreadRng) -> usize {
         if rng.r#gen::<f32>() < self.epsilon { rng.gen_range(0..3) } else {
             let qs = *self.get_qs(s);
@@ -253,6 +290,7 @@ impl QAgent {
         }
     }
 
+    /// Q-learning update for (state, action, reward, next_state, done).
     fn learn(&mut self, s: u32, a: usize, r: f32, ns: u32, done: bool) {
         let next_max = if done {
             0.0
@@ -267,6 +305,7 @@ impl QAgent {
     }
     
     // Reset exploration parameters for more aggressive learning
+    /// Temporarily increase exploration and learning rate (used on restarts).
     fn boost_exploration(&mut self) {
         self.epsilon = 0.35; // умеренное увеличение
         self.alpha = 0.45; // умеренное ускорение обучения
@@ -277,6 +316,7 @@ impl QAgent {
 // Evolutionary trainer (population of agents)
 // ============================
 
+/// Evolutionary trainer managing a population of QAgents and parallel games.
 struct EvoTrainer {
     training: bool,
     solved: bool,
@@ -299,6 +339,7 @@ struct EvoTrainer {
 }
 
 impl EvoTrainer {
+    /// Create a trainer with `pop_size` agents and parallel games.
     fn new(pop_size: usize) -> Self {
         let mut pop = Vec::with_capacity(pop_size);
         let mut games = Vec::with_capacity(pop_size);
@@ -315,6 +356,7 @@ impl EvoTrainer {
         Self { training: false, solved: false, pop, pop_size, current: 0, epoch: 0, epoch_best: Vec::new(), scores: vec![0; pop_size], step_limit: 4000, steps_taken: 0, target_score: max_apples, best_score: 0, games, champion: None, champion_score: 0, champion_epoch: 0, epochs_without_improvement: 0, restart_count: 0 }
     }
 
+    /// Save the current champion (or best of population) to JSON.
     fn save_best(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
         // Save the champion if we have one, otherwise save current best
         let agent_to_save = if let Some(ref champ) = self.champion {
@@ -331,6 +373,7 @@ impl EvoTrainer {
         Ok(())
     }
 
+    /// Load a champion agent from JSON and seed the population from it.
     fn load_best(&mut self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
         if !Path::new(path).exists() { return Ok(()); }
         let json = fs::read_to_string(path)?;
@@ -347,6 +390,7 @@ impl EvoTrainer {
         Ok(())
     }
 
+    /// Reset per-epoch counters and restart all games.
     fn reset_epoch(&mut self) { 
         self.current = 0; 
         self.steps_taken = 0; 
@@ -356,6 +400,7 @@ impl EvoTrainer {
         }
     }
 
+    /// Reproduce a new generation with elitism, mutation, and adaptive restarts.
     fn reproduce(&mut self, rng: &mut rand::rngs::ThreadRng, save_path: &str) {
         let mut idxs: Vec<usize> = (0..self.pop_size).collect();
         idxs.sort_by_key(|&i| std::cmp::Reverse(self.scores[i]));
@@ -566,6 +611,7 @@ impl EvoTrainer {
     }
 }
 
+/// Mutate Q-values and decay epsilon slightly; `sigma` controls noise magnitude.
 fn mutate_qagent(agent: &mut QAgent, rng: &mut rand::rngs::ThreadRng, sigma: f32) {
     for arr in agent.q.values_mut() {
         for v in arr.iter_mut() { *v += rng.gen_range(-sigma..sigma); }
@@ -573,11 +619,15 @@ fn mutate_qagent(agent: &mut QAgent, rng: &mut rand::rngs::ThreadRng, sigma: f32
     agent.epsilon = (agent.epsilon * agent.decay).max(agent.min_epsilon);
 }
 
+/// Rotate direction 90° left.
 fn left_dir(d: Dir) -> Dir { match d { Dir::Up=>Dir::Left, Dir::Left=>Dir::Down, Dir::Down=>Dir::Right, Dir::Right=>Dir::Up } }
+/// Rotate direction 90° right.
 fn right_dir(d: Dir) -> Dir { match d { Dir::Up=>Dir::Right, Dir::Right=>Dir::Down, Dir::Down=>Dir::Left, Dir::Left=>Dir::Up } }
+/// Apply an action index to a direction: 0=left, 1=straight, 2=right.
 fn dir_after_action(d: Dir, a: usize) -> Dir { match a { 0=>left_dir(d), 1=>d, _=>right_dir(d) } }
 
 // Генерирует разнообразные цвета для популяции
+/// Generate distinct RGB colors for a population using HSL hue sampling.
 fn generate_population_colors(pop_size: usize) -> Vec<(u8, u8, u8)> {
     let mut colors = Vec::with_capacity(pop_size);
     for i in 0..pop_size {
@@ -589,6 +639,7 @@ fn generate_population_colors(pop_size: usize) -> Vec<(u8, u8, u8)> {
 }
 
 // Конвертирует HSL в RGB
+/// Convert HSL to RGB (0..=255 per channel).
 fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
     let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
     let h_prime = h / 60.0;
@@ -611,6 +662,7 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
 }
 
 // Мутирует цвет с небольшим изменением
+/// Slightly mutate an RGB color by ±`range` per channel (clamped to 0..255).
 fn mutate_color(color: (u8, u8, u8), range: i32) -> (u8, u8, u8) {
     let mut rng = rand::thread_rng();
     let r = (color.0 as i32 + rng.gen_range(-range..=range)).clamp(0, 255) as u8;
@@ -619,6 +671,8 @@ fn mutate_color(color: (u8, u8, u8), range: i32) -> (u8, u8, u8) {
     (r, g, b)
 }
 
+/// Build a compact 20-bit state key from the game: 16 bits of local vision, 2 bits
+/// of relative direction to the apple, and 2 bits of distance bucket.
 fn state_key(game: &Game) -> u32 {
     // Компактный vision-based подход БЕЗ хэширования
     // Смотрим только на критически важные клетки вокруг головы (3x3 впереди)
@@ -701,6 +755,8 @@ fn state_key(game: &Game) -> u32 {
     k
 }
 
+/// Entry point: sets up the window, renderer, input loop, and optionally runs
+/// evolutionary training.
 fn main() -> Result<(), Error> {
     let event_loop = EventLoop::new();
     let mut input = WinitInputHelper::new();
@@ -1103,10 +1159,12 @@ fn main() -> Result<(), Error> {
 // Rendering helpers and UI
 // ============================
 
+/// Clear the entire frame buffer to a single RGBA color.
 fn clear_rgba(frame: &mut [u8], r: u8, g: u8, b: u8, a: u8) {
     for px in frame.chunks_exact_mut(4) { px[0]=r; px[1]=g; px[2]=b; px[3]=a; }
 }
 
+/// Alpha-blend a pixel into the frame at (x,y).
 fn blend_pixel(frame: &mut [u8], x: u32, y: u32, r: u8, g: u8, b: u8, a: u8) {
     if x>=WIDTH || y>=HEIGHT {return;} let idx=((y*WIDTH+x)*4) as usize; if idx+3>=frame.len(){return;}
     let ar=a as u16; let iar=(255-a) as u16; let dr=frame[idx] as u16; let dg=frame[idx+1] as u16; let db=frame[idx+2] as u16;
@@ -1116,25 +1174,30 @@ fn blend_pixel(frame: &mut [u8], x: u32, y: u32, r: u8, g: u8, b: u8, a: u8) {
     frame[idx+3] = 255;
 }
 
+/// Fill an axis-aligned rectangle with an RGBA color (alpha-blended per pixel).
 fn fill_rect_rgba(frame: &mut [u8], x: u32, y: u32, w: u32, h: u32, r: u8, g: u8, b: u8, a: u8) {
     let x2=(x+w).min(WIDTH); let y2=(y+h).min(HEIGHT);
     for py in y..y2 { for px in x..x2 { blend_pixel(frame, px, py, r,g,b,a); } }
 }
 
+/// Draw a rectangle border with an RGBA color.
 fn stroke_rect_rgba(frame: &mut [u8], x: u32, y: u32, w: u32, h: u32, r: u8, g: u8, b: u8, a: u8) {
     if w==0||h==0 {return;} let x2=(x+w-1).min(WIDTH-1); let y2=(y+h-1).min(HEIGHT-1);
     for px in x..=x2 { blend_pixel(frame, px, y, r,g,b,a); blend_pixel(frame, px, y2, r,g,b,a);} 
     for py in y..=y2 { blend_pixel(frame, x, py, r,g,b,a); blend_pixel(frame, x2, py, r,g,b,a);} 
 }
 
+/// Fill a single grid cell with an opaque RGB color.
 fn fill_cell_rgb(frame: &mut [u8], grid_x: u32, grid_y: u32, r: u8, g: u8, b: u8) {
     let x=grid_x*GRID_SIZE; let y=grid_y*GRID_SIZE; fill_rect_rgba(frame, x, y, GRID_SIZE, GRID_SIZE, r,g,b,255);
 }
 
+/// Fill a single grid cell with an RGBA color.
 fn fill_cell_rgba(frame: &mut [u8], grid_x: u32, grid_y: u32, r: u8, g: u8, b: u8, a: u8) {
     let x=grid_x*GRID_SIZE; let y=grid_y*GRID_SIZE; fill_rect_rgba(frame, x, y, GRID_SIZE, GRID_SIZE, r,g,b,a);
 }
 
+/// Draw the game semi-transparently, tinting the snake by `color` (used to show many agents).
 fn draw_game_transparent(frame: &mut [u8], game: &Game, alpha: u8, color: (u8, u8, u8)) {
     if !game.alive { return; }
     
@@ -1162,14 +1225,17 @@ fn draw_game_transparent(frame: &mut [u8], game: &Game, alpha: u8, color: (u8, u
     }
 }
 
+/// Draw a simple UI button with a text label.
 fn draw_button(frame: &mut [u8], x: u32, y: u32, w: u32, h: u32, label: &str) {
     fill_rect_rgba(frame, x, y, w, h, 40, 40, 60, 160);
     stroke_rect_rgba(frame, x, y, w, h, 200, 200, 220, 120);
     draw_text(frame, label, x+10, y + (h/2 - 6), 2, (230,240,255,255));
 }
 
+/// Check whether a point lies within a rectangle.
 fn point_in_rect(px: u32, py: u32, x: u32, y: u32, w: u32, h: u32) -> bool { px>=x && py>=y && px<x+w && py<y+h }
 
+/// Returns a 5x7 bitmap glyph for a limited set of characters (ASCII-like UI font).
 fn glyph_5x7(ch: char) -> Option<[u8;7]> {
     let c=ch.to_ascii_uppercase();
     Some(match c {
@@ -1217,6 +1283,7 @@ fn glyph_5x7(ch: char) -> Option<[u8;7]> {
     })
 }
 
+/// Draw a single bitmap character and return its advance in pixels.
 fn draw_char(frame: &mut [u8], ch: char, x: u32, y: u32, scale: u32, col: (u8,u8,u8,u8)) -> u32 {
     if let Some(rows)=glyph_5x7(ch){
         for (ry,row) in rows.iter().enumerate(){
@@ -1230,11 +1297,13 @@ fn draw_char(frame: &mut [u8], ch: char, x: u32, y: u32, scale: u32, col: (u8,u8
     } else { 5*scale + scale }
 }
 
+/// Draw a text string using the 5x7 glyph font.
 fn draw_text(frame: &mut [u8], text: &str, x: u32, y: u32, scale: u32, col: (u8,u8,u8,u8)) {
     let mut cx=x; for ch in text.chars(){ cx += draw_char(frame, ch, cx, y, scale, col); }
 }
 
-fn draw_chart(frame: &mut [u8], x: u32, y: u32, w: u32, h: u32, data: &Vec<usize>) {
+/// Draw a simple bar chart of best scores per epoch.
+fn draw_chart(frame: &mut [u8], x: u32, y: u32, w: u32, h: u32, data: &[usize]) {
     stroke_rect_rgba(frame, x, y, w, h, 200,200,200,120);
     if data.is_empty() { return; }
     let max_val = *data.iter().max().unwrap_or(&1) as u32;
@@ -1242,7 +1311,7 @@ fn draw_chart(frame: &mut [u8], x: u32, y: u32, w: u32, h: u32, data: &Vec<usize
     let bars = data.len().min(w as usize / 6);
     let bar_w = (w / bars as u32).max(2);
     for i in 0..bars {
-        let v = data[data.len()-bars + i] as u32;
+    let v = data[data.len()-bars + i] as u32;
         let bh = (v * (h-2)) / max_val;
         let bx = x + 1 + i as u32 * bar_w;
         let by = y + h - 1 - bh;
