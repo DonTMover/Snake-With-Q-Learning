@@ -693,19 +693,6 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
 /// Slightly mutate an RGB color by ±`range` per channel (clamped to 0..255).
 fn mutate_color(color: (u8, u8, u8), range: i32) -> (u8, u8, u8) {
     let mut rng: SmallRng = SmallRng::from_entropy();
-    // Detect GPU availability using wgpu
-    let mut gpu_available: bool = false;
-    let mut gpu_enabled: bool = false;
-    {
-        let instance = Instance::new(Backends::VULKAN | Backends::DX12 | Backends::DX11 | Backends::GL);
-        // Prefer high performance adapter
-        let options = RequestAdapterOptions { power_preference: PowerPreference::HighPerformance, compatible_surface: None, force_fallback_adapter: false };
-        if let Some(adapter) = pollster::block_on(instance.request_adapter(&options)) {
-            // Optionally check features/limits here; we just mark available
-            gpu_available = true;
-            gpu_enabled = true; // auto-enable if available
-        }
-    }
     let r = (color.0 as i32 + rng.gen_range(-range..=range)).clamp(0, 255) as u8;
     let g = (color.1 as i32 + rng.gen_range(-range..=range)).clamp(0, 255) as u8;
     let b = (color.2 as i32 + rng.gen_range(-range..=range)).clamp(0, 255) as u8;
@@ -846,7 +833,18 @@ fn main() -> Result<(), Error> {
     let mut max_steps_per_tick: u32 = 1500; // cap work per tick to keep UI responsive
     let mut ultra_fast: bool = false; // training ultra-fast mode (disable render, raise cap)
     let mut show_only_best: bool = false; // render only the best agent during training
-    if gpu_enabled { max_steps_per_tick = 80_000; }
+    // GPU detection (wgpu) and accel flags
+    let mut gpu_available: bool = false;
+    let mut gpu_enabled: bool = false;
+    {
+        let instance = Instance::new(wgpu::InstanceDescriptor{backends: Backends::VULKAN | Backends::DX12 | Backends::GL, ..Default::default()});
+        let options = RequestAdapterOptions { power_preference: PowerPreference::HighPerformance, compatible_surface: None, force_fallback_adapter: false };
+        if let Some(_adapter) = pollster::block_on(instance.request_adapter(&options)) {
+            gpu_available = true;
+            gpu_enabled = true;
+            max_steps_per_tick = 80_000;
+        }
+    }
     // FPS counter state
     let mut fps_last: Instant = Instant::now();
     let mut fps_frames: u32 = 0;
