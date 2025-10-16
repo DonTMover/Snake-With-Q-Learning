@@ -219,7 +219,7 @@ impl Game {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct QAgent {
-    q: HashMap<u16, [f32; 3]>,
+    q: HashMap<u32, [f32; 3]>,
     epsilon: f32,
     min_epsilon: f32,
     decay: f32,
@@ -227,23 +227,33 @@ struct QAgent {
     gamma: f32,
     steps: u64,
     episodes: u64,
+    #[serde(skip)]
+    color: (u8, u8, u8), // RGB цвет агента (не сохраняется)
 }
 
 impl QAgent {
     fn new() -> Self {
-        Self { q: HashMap::new(), epsilon: 0.3, min_epsilon: 0.1, decay: 0.9985, alpha: 0.4, gamma: 0.95, steps: 0, episodes: 0 }
+        // Сбалансированные параметры для 20-битного vision
+        // Дефолтный цвет - яркий зелёный (будет перезаписан при создании популяции)
+        Self { q: HashMap::new(), epsilon: 0.25, min_epsilon: 0.05, decay: 0.9992, alpha: 0.3, gamma: 0.95, steps: 0, episodes: 0, color: (100, 220, 100) }
+    }
+    
+    fn new_with_color(r: u8, g: u8, b: u8) -> Self {
+        let mut agent = Self::new();
+        agent.color = (r, g, b);
+        agent
     }
 
-    fn get_qs(&mut self, s: u16) -> &mut [f32;3] { self.q.entry(s).or_insert([0.0, 0.0, 0.0]) }
+    fn get_qs(&mut self, s: u32) -> &mut [f32;3] { self.q.entry(s).or_insert([0.0, 0.0, 0.0]) }
 
-    fn select_action(&mut self, s: u16, rng: &mut rand::rngs::ThreadRng) -> usize {
+    fn select_action(&mut self, s: u32, rng: &mut rand::rngs::ThreadRng) -> usize {
         if rng.r#gen::<f32>() < self.epsilon { rng.gen_range(0..3) } else {
             let qs = *self.get_qs(s);
             if qs[0] >= qs[1] && qs[0] >= qs[2] { 0 } else if qs[1] >= qs[2] { 1 } else { 2 }
         }
     }
 
-    fn learn(&mut self, s: u16, a: usize, r: f32, ns: u16, done: bool) {
+    fn learn(&mut self, s: u32, a: usize, r: f32, ns: u32, done: bool) {
         let next_max = if done {
             0.0
         } else {
@@ -254,6 +264,12 @@ impl QAgent {
         let qsa = self.get_qs(s);
         let td_target = r + gamma * next_max;
         qsa[a] = qsa[a] + alpha * (td_target - qsa[a]);
+    }
+    
+    // Reset exploration parameters for more aggressive learning
+    fn boost_exploration(&mut self) {
+        self.epsilon = 0.35; // умеренное увеличение
+        self.alpha = 0.45; // умеренное ускорение обучения
     }
 }
 
@@ -279,18 +295,24 @@ struct EvoTrainer {
     champion_score: usize, // best score ever achieved
     champion_epoch: usize, // epoch when champion was found
     epochs_without_improvement: usize, // counter for stagnation
+    restart_count: usize, // number of restarts performed
 }
 
 impl EvoTrainer {
     fn new(pop_size: usize) -> Self {
         let mut pop = Vec::with_capacity(pop_size);
         let mut games = Vec::with_capacity(pop_size);
-        for _ in 0..pop_size { 
-            pop.push(QAgent::new());
+        
+        // Генерируем уникальные цвета для каждого агента в популяции
+        let colors = generate_population_colors(pop_size);
+        
+        for i in 0..pop_size { 
+            let (r, g, b) = colors[i];
+            pop.push(QAgent::new_with_color(r, g, b));
             games.push(Game::new());
         }
         let max_apples = (GRID_WIDTH as usize * GRID_HEIGHT as usize).saturating_sub(3); // 3 is initial snake length
-        Self { training: false, solved: false, pop, pop_size, current: 0, epoch: 0, epoch_best: Vec::new(), scores: vec![0; pop_size], step_limit: 3000, steps_taken: 0, target_score: max_apples, best_score: 0, games, champion: None, champion_score: 0, champion_epoch: 0, epochs_without_improvement: 0 }
+        Self { training: false, solved: false, pop, pop_size, current: 0, epoch: 0, epoch_best: Vec::new(), scores: vec![0; pop_size], step_limit: 4000, steps_taken: 0, target_score: max_apples, best_score: 0, games, champion: None, champion_score: 0, champion_epoch: 0, epochs_without_improvement: 0, restart_count: 0 }
     }
 
     fn save_best(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -313,9 +335,14 @@ impl EvoTrainer {
         if !Path::new(path).exists() { return Ok(()); }
         let json = fs::read_to_string(path)?;
         let agent: QAgent = serde_json::from_str(&json)?;
-        // Replace all agents with the loaded one
+        
+        // Генерируем яркие цвета для загруженных агентов
+        let colors = generate_population_colors(self.pop_size);
+        
+        // Replace all agents with the loaded one + assign colors
         for i in 0..self.pop_size {
             self.pop[i] = agent.clone();
+            self.pop[i].color = colors[i]; // устанавливаем уникальный цвет
         }
         Ok(())
     }
@@ -336,7 +363,6 @@ impl EvoTrainer {
         let best_score = self.scores[best_idx];
         self.epoch_best.push(best_score);
         
-        let prev_best = self.best_score;
         self.best_score = self.best_score.max(best_score);
         
         let mut new_champion = false;
@@ -361,54 +387,176 @@ impl EvoTrainer {
         
         let mut new_pop: Vec<QAgent> = Vec::with_capacity(self.pop_size);
         
-        // Check for long stagnation (500 epochs without improvement)
-        let stagnation_threshold = 500;
+        // Adaptive stagnation threshold: increase after each restart to give more time
+        let base_threshold = 1000;
+        let stagnation_threshold = base_threshold + (self.restart_count * 500);
+        
+        // Check for long stagnation
         if self.epochs_without_improvement >= stagnation_threshold && self.champion.is_some() {
-            println!("⚠️ Stagnation detected ({} epochs without improvement). Restarting with high mutation from champion...", self.epochs_without_improvement);
+            // After 5 restarts, cycle back to restart #1 but with even more aggressive exploration
+            if self.restart_count >= 5 {
+                self.restart_count = 0; // cycle back
+                println!("🔄 Max restarts reached. Cycling back with aggressive exploration...");
+            }
+            
+            self.restart_count += 1;
+            println!("⚠️ Stagnation detected ({} epochs without improvement). Restart #{} with exploration...", 
+                     self.epochs_without_improvement, self.restart_count);
             self.epochs_without_improvement = 0; // reset counter
             
-            // Restart from champion with high mutation for diversity
+            // Multi-strategy restart based on restart count
             let champion = self.champion.as_ref().unwrap();
-            new_pop.push(champion.clone()); // keep champion
-            while new_pop.len() < self.pop_size {
-                let mut child = champion.clone();
-                mutate_qagent(&mut child, rng, 0.4); // high mutation for exploration
-                new_pop.push(child);
+            
+            match self.restart_count {
+                1 => {
+                    // First restart: moderate mutation + boost exploration
+                    new_pop.push(champion.clone());
+                    while new_pop.len() < self.pop_size {
+                        let mut child = champion.clone();
+                        child.boost_exploration(); // reset epsilon and alpha
+                        mutate_qagent(&mut child, rng, 0.25); // moderate mutation
+                        // Slightly mutate color for diversity
+                        child.color = mutate_color(champion.color, 20);
+                        new_pop.push(child);
+                    }
+                }
+                2 => {
+                    // Second restart: high mutation + more fresh agents + boost
+                    new_pop.push(champion.clone());
+                    for _ in 1..(self.pop_size / 2) { // changed from 2/3 to 1/2
+                        let mut child = champion.clone();
+                        child.boost_exploration();
+                        mutate_qagent(&mut child, rng, 0.4); // high mutation
+                        child.color = mutate_color(champion.color, 30);
+                        new_pop.push(child);
+                    }
+                    // Add more fresh random agents (50%) with new colors
+                    let remaining = self.pop_size - new_pop.len();
+                    let new_colors = generate_population_colors(remaining);
+                    for i in 0..remaining {
+                        let mut agent = QAgent::new();
+                        agent.color = new_colors[i];
+                        new_pop.push(agent);
+                    }
+                }
+                3 => {
+                    // Third restart: 30% champion, 70% fresh agents
+                    new_pop.push(champion.clone());
+                    for _ in 1..(self.pop_size * 3 / 10) { // 30%
+                        let mut child = champion.clone();
+                        child.boost_exploration();
+                        mutate_qagent(&mut child, rng, 0.35);
+                        child.color = mutate_color(champion.color, 40);
+                        new_pop.push(child);
+                    }
+                    // Add fresh random agents (70%) with new colors
+                    let remaining = self.pop_size - new_pop.len();
+                    let new_colors = generate_population_colors(remaining);
+                    for i in 0..remaining {
+                        let mut agent = QAgent::new();
+                        agent.color = new_colors[i];
+                        new_pop.push(agent);
+                    }
+                }
+                4 => {
+                    // Fourth restart: 20% champion + 80% fresh agents + boost
+                    new_pop.push(champion.clone());
+                    for _ in 1..(self.pop_size / 5) { // 20%
+                        let mut child = champion.clone();
+                        child.boost_exploration();
+                        mutate_qagent(&mut child, rng, 0.6); // very high mutation
+                        child.color = mutate_color(champion.color, 50);
+                        new_pop.push(child);
+                    }
+                    // Add mostly fresh random agents (80%) with new colors
+                    let remaining = self.pop_size - new_pop.len();
+                    let new_colors = generate_population_colors(remaining);
+                    for i in 0..remaining {
+                        let mut agent = QAgent::new();
+                        agent.color = new_colors[i];
+                        new_pop.push(agent);
+                    }
+                }
+                _ => {
+                    // Fifth restart: 10% champion + 90% fresh agents + extreme boost
+                    new_pop.push(champion.clone());
+                    for _ in 1..(self.pop_size / 10) { // 10%
+                        let mut child = champion.clone();
+                        child.boost_exploration();
+                        mutate_qagent(&mut child, rng, 0.8); // extreme mutation
+                        child.color = mutate_color(champion.color, 60);
+                        new_pop.push(child);
+                    }
+                    // Add mostly fresh random agents (90%) with new colors + boost
+                    let remaining = self.pop_size - new_pop.len();
+                    let new_colors = generate_population_colors(remaining);
+                    for i in 0..remaining {
+                        let mut agent = QAgent::new();
+                        agent.boost_exploration(); // boost fresh agents too
+                        agent.color = new_colors[i];
+                        new_pop.push(agent);
+                    }
+                }
             }
         }
         // If we have a new champion, restart population from champion's children
         else if new_champion && self.champion.is_some() {
+            self.restart_count = 0; // reset restart counter on new champion
             let champion = self.champion.as_ref().unwrap();
             // First agent is the champion itself (elitism)
             new_pop.push(champion.clone());
-            // Rest are mutated versions of the champion
+            // Rest are mutated versions of the champion with slight color variations
             while new_pop.len() < self.pop_size {
                 let mut child = champion.clone();
                 mutate_qagent(&mut child, rng, 0.15); // moderate mutation for exploration
+                child.color = mutate_color(champion.color, 25); // slight color variation
                 new_pop.push(child);
             }
         } else {
-            // Normal reproduction: top-3 elitism with adaptive mutation
-            // Increase mutation if stuck for too long
-            let base_sigma = if best_score > prev_best { 0.05 } else { 0.15 };
-            let mutation_sigma = if self.epochs_without_improvement > 100 { 
-                base_sigma + 0.1 // increase mutation if stuck
-            } else { 
-                base_sigma 
-            };
+            // Normal reproduction: 3 элиты + 4 детей + 3 новых (баланс эксплуатации и исследования)
             let top_k = 3.min(self.pop_size);
             
-            // Elitism: keep top 3 unchanged
+            // 1. Elitism: keep top 3 unchanged (30%)
             for i in 0..top_k {
                 new_pop.push(self.pop[idxs[i]].clone());
             }
             
-            // Fill rest with mutations from random top parents
-            while new_pop.len() < self.pop_size {
-                let parent_idx = idxs[rng.gen_range(0..top_k)];
-                let mut child = self.pop[parent_idx].clone();
-                mutate_qagent(&mut child, rng, mutation_sigma);
+            // 2. Создаём 4 детей от элиты с мутациями и смешением цветов (40%)
+            let num_children = 4;
+            for _ in 0..num_children {
+                // Выбираем двух случайных родителей из топ-3
+                let parent1_idx = idxs[rng.gen_range(0..top_k)];
+                let parent2_idx = idxs[rng.gen_range(0..top_k)];
+                
+                let mut child = self.pop[parent1_idx].clone();
+                
+                // Умеренная мутация Q-таблицы
+                mutate_qagent(&mut child, rng, 0.15);
+                
+                // Смешиваем цвета родителей для визуального наследования
+                let ratio = rng.gen_range(0.3..0.7);
+                let c1 = self.pop[parent1_idx].color;
+                let c2 = self.pop[parent2_idx].color;
+                let blended = (
+                    ((c1.0 as f32 * (1.0 - ratio) + c2.0 as f32 * ratio) as u8),
+                    ((c1.1 as f32 * (1.0 - ratio) + c2.1 as f32 * ratio) as u8),
+                    ((c1.2 as f32 * (1.0 - ratio) + c2.2 as f32 * ratio) as u8),
+                );
+                
+                // Добавляем небольшую мутацию цвета для уникальности каждого ребёнка
+                child.color = mutate_color(blended, 15);
+                
                 new_pop.push(child);
+            }
+            
+            // 3. Добавляем 3 новых случайных агента с уникальными цветами (30%)
+            let num_fresh = 3.min(self.pop_size - new_pop.len());
+            let fresh_colors = generate_population_colors(num_fresh);
+            
+            for i in 0..num_fresh {
+                let mut agent = QAgent::new();
+                agent.color = fresh_colors[i];
+                new_pop.push(agent);
             }
         }
         
@@ -429,39 +577,127 @@ fn left_dir(d: Dir) -> Dir { match d { Dir::Up=>Dir::Left, Dir::Left=>Dir::Down,
 fn right_dir(d: Dir) -> Dir { match d { Dir::Up=>Dir::Right, Dir::Right=>Dir::Down, Dir::Down=>Dir::Left, Dir::Left=>Dir::Up } }
 fn dir_after_action(d: Dir, a: usize) -> Dir { match a { 0=>left_dir(d), 1=>d, _=>right_dir(d) } }
 
-fn offset_for_dir(d: Dir) -> (i32,i32) { match d { Dir::Up=>(0,-1), Dir::Down=>(0,1), Dir::Left=>(-1,0), Dir::Right=>(1,0) } }
-
-fn will_collide(game: &Game, dir: Dir) -> bool {
-    let head = game.snake.front().unwrap();
-    let (dx,dy) = offset_for_dir(dir);
-    let nx = head.x + dx; let ny = head.y + dy;
-    if nx < 0 || ny < 0 || nx >= GRID_WIDTH as i32 || ny >= GRID_HEIGHT as i32 { return true; }
-    let np = Pos::new(nx, ny);
-    game.snake.iter().any(|&s| s == np)
-}
-
-fn apple_relative_flags(game: &Game) -> (bool,bool,bool) {
-    let head = game.snake.front().unwrap();
-    let (dx,dy) = (game.apple.x - head.x, game.apple.y - head.y);
-    match game.dir {
-        Dir::Up => (dx < 0, dy < 0, dx > 0),
-        Dir::Down => (dx > 0, dy > 0, dx < 0),
-        Dir::Left => (dy > 0, dx < 0, dy < 0),
-        Dir::Right => (dy < 0, dx > 0, dy > 0),
+// Генерирует разнообразные цвета для популяции
+fn generate_population_colors(pop_size: usize) -> Vec<(u8, u8, u8)> {
+    let mut colors = Vec::with_capacity(pop_size);
+    for i in 0..pop_size {
+        let hue = (i as f32 / pop_size as f32) * 360.0;
+        let (r, g, b) = hsl_to_rgb(hue, 0.85, 0.65); // увеличена насыщенность и яркость
+        colors.push((r, g, b));
     }
+    colors
 }
 
-fn state_key(game: &Game) -> u16 {
-    // Bits: 0 danger_left, 1 danger_ahead, 2 danger_right, 3 apple_left, 4 apple_straight, 5 apple_right
-    let dl = will_collide(game, left_dir(game.dir));
-    let da = will_collide(game, game.dir);
-    let dr = will_collide(game, right_dir(game.dir));
-    let (al, as_, ar) = apple_relative_flags(game);
-    let mut k: u16 = 0;
-    if dl { k |= 1<<0; } if da { k |= 1<<1; } if dr { k |= 1<<2; }
-    if al { k |= 1<<3; }
-    if as_ { k |= 1<<4; }
-    if ar { k |= 1<<5; }
+// Конвертирует HSL в RGB
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let h_prime = h / 60.0;
+    let x = c * (1.0 - ((h_prime % 2.0) - 1.0).abs());
+    let (r1, g1, b1) = match h_prime as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        5 => (c, 0.0, x),
+        _ => (c, x, 0.0),
+    };
+    let m = l - c / 2.0;
+    (
+        ((r1 + m) * 255.0) as u8,
+        ((g1 + m) * 255.0) as u8,
+        ((b1 + m) * 255.0) as u8,
+    )
+}
+
+// Мутирует цвет с небольшим изменением
+fn mutate_color(color: (u8, u8, u8), range: i32) -> (u8, u8, u8) {
+    let mut rng = rand::thread_rng();
+    let r = (color.0 as i32 + rng.gen_range(-range..=range)).clamp(0, 255) as u8;
+    let g = (color.1 as i32 + rng.gen_range(-range..=range)).clamp(0, 255) as u8;
+    let b = (color.2 as i32 + rng.gen_range(-range..=range)).clamp(0, 255) as u8;
+    (r, g, b)
+}
+
+fn state_key(game: &Game) -> u32 {
+    // Компактный vision-based подход БЕЗ хэширования
+    // Смотрим только на критически важные клетки вокруг головы (3x3 впереди)
+    // Итого: 16 бит для vision + 4 бита для контекста = 20 бит (~1M состояний)
+    
+    let head = game.snake.front().unwrap();
+    let mut k: u32 = 0;
+    
+    // Получаем 8 клеток вокруг головы относительно направления движения
+    // Кодируем каждую клетку 2 битами: 00=пусто, 01=опасность(стена/тело), 10=яблоко, 11=unused
+    let checks = [
+        (-1, -1), (0, -1), (1, -1),  // left-ahead, ahead, right-ahead (приоритетные)
+        (-1,  0),          (1,  0),  // left, right
+        (-1,  1), (0,  1), (1,  1),  // left-behind, behind, right-behind
+    ];
+    
+    let mut bit_pos = 0;
+    for (dx, dy) in &checks {
+        // Преобразуем относительные координаты в зависимости от направления
+        let (world_dx, world_dy) = match game.dir {
+            Dir::Right => (*dy, *dx),
+            Dir::Left => (-*dy, -*dx),
+            Dir::Up => (*dx, -*dy),
+            Dir::Down => (-*dx, *dy),
+        };
+        
+        let check_x = head.x + world_dx;
+        let check_y = head.y + world_dy;
+        
+        let cell_value = if check_x < 0 || check_x >= GRID_WIDTH as i32 || 
+                           check_y < 0 || check_y >= GRID_HEIGHT as i32 {
+            1 // стена/граница = опасность
+        } else {
+            let pos = Pos::new(check_x, check_y);
+            if game.snake.iter().any(|&s| s == pos) {
+                1 // тело змеи = опасность
+            } else if pos == game.apple {
+                2 // яблоко
+            } else {
+                0 // пусто
+            }
+        };
+        
+        k |= (cell_value as u32) << bit_pos;
+        bit_pos += 2;
+    }
+    
+    // Биты 16-17: направление к яблоку (left/straight/right относительно текущего направления)
+    let apple_dx = game.apple.x - head.x;
+    let apple_dy = game.apple.y - head.y;
+    let apple_dir = match game.dir {
+        Dir::Right => {
+            if apple_dy < -1 { 0 } // left
+            else if apple_dy > 1 { 2 } // right
+            else { 1 } // straight-ish
+        },
+        Dir::Left => {
+            if apple_dy > 1 { 0 } // left
+            else if apple_dy < -1 { 2 } // right
+            else { 1 } // straight-ish
+        },
+        Dir::Up => {
+            if apple_dx < -1 { 0 } // left
+            else if apple_dx > 1 { 2 } // right
+            else { 1 } // straight-ish
+        },
+        Dir::Down => {
+            if apple_dx > 1 { 0 } // left
+            else if apple_dx < -1 { 2 } // right
+            else { 1 } // straight-ish
+        },
+    };
+    k |= apple_dir << 16;
+    
+    // Биты 18-19: дистанция до яблока (4 категории)
+    let dist = apple_dx.abs() + apple_dy.abs();
+    let dist_cat = if dist <= 3 { 0 } else if dist <= 8 { 1 } else if dist <= 16 { 2 } else { 3 };
+    k |= dist_cat << 18;
+    
     k
 }
 
@@ -483,7 +719,7 @@ fn main() -> Result<(), Error> {
     };
 
     let mut game = Game::new();
-    let mut evo = EvoTrainer::new(10);
+    let mut evo = EvoTrainer::new(10); // оптимальная популяция для 20-бит vision
     
     // Try to load saved agent and auto-start training if found
     let save_path = "snake_agent.json";
@@ -505,8 +741,9 @@ fn main() -> Result<(), Error> {
     let mut last_update = Instant::now();
     let mut tick_duration = Duration::from_millis(150);
     let mut manual_speed_delta_ms: i32 = 0;
-    let mut evo_steps_per_frame: u32 = 1200; // evolution training speed (steps processed per frame)
+    let mut evo_steps_per_frame: u32 = 1; // начальная скорость = 1 шаг за кадр (медленно для наблюдения)
     let mut panel_visible: bool = true; // panel visibility toggle
+    let mut frame_counter: u32 = 0; // counter for skipping frames
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Poll;
@@ -516,31 +753,46 @@ fn main() -> Result<(), Error> {
             
             // Draw the appropriate game(s)
             if evo.training {
-                // Draw all 10 individuals semi-transparently
-                clear_rgba(frame, 30, 30, 40, 255);
-                // Draw grid first
-                for y in 0..GRID_HEIGHT {
-                    for x in 0..GRID_WIDTH {
-                        if (x + y) % 2 == 0 {
-                            let gx = x * GRID_SIZE;
-                            let gy = y * GRID_SIZE;
-                            for py in gy..gy + GRID_SIZE {
-                                for px in gx..gx + GRID_SIZE {
-                                    if px < WIDTH && py < HEIGHT {
-                                        let idx = ((py * WIDTH + px) * 4) as usize;
-                                        if idx + 3 < frame.len() {
-                                            frame[idx] = 35; frame[idx + 1] = 35; frame[idx + 2] = 50; frame[idx + 3] = 255;
+                // At very high speeds (20K+), skip game rendering entirely for maximum performance
+                if evo_steps_per_frame < 20_000 {
+                    // Draw all individuals semi-transparently
+                    clear_rgba(frame, 30, 30, 40, 255);
+                    // Draw grid first
+                    for y in 0..GRID_HEIGHT {
+                        for x in 0..GRID_WIDTH {
+                            if (x + y) % 2 == 0 {
+                                let gx = x * GRID_SIZE;
+                                let gy = y * GRID_SIZE;
+                                for py in gy..gy + GRID_SIZE {
+                                    for px in gx..gx + GRID_SIZE {
+                                        if px < WIDTH && py < HEIGHT {
+                                            let idx = ((py * WIDTH + px) * 4) as usize;
+                                            if idx + 3 < frame.len() {
+                                                frame[idx] = 35; frame[idx + 1] = 35; frame[idx + 2] = 50; frame[idx + 3] = 255;
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
                     }
-                }
-                
-                // Draw all individuals
-                for g in &evo.games {
-                    draw_game_transparent(frame, g, 120); // alpha 120 for better visibility
+                    
+                    // Draw all individuals only if speed is low (for better performance at high speeds)
+                    if evo_steps_per_frame < 10_000 {
+                        for (i, g) in evo.games.iter().enumerate() {
+                            let agent_color = evo.pop[i].color;
+                            draw_game_transparent(frame, g, 180, agent_color); // увеличена непрозрачность до 180
+                        }
+                    } else {
+                        // At high speeds, just draw the best performing individual
+                        if let Some(best_game_idx) = evo.scores.iter().enumerate().max_by_key(|(_, score)| *score).map(|(idx, _)| idx) {
+                            let agent_color = evo.pop[best_game_idx].color;
+                            draw_game_transparent(frame, &evo.games[best_game_idx], 220, agent_color); // более непрозрачный
+                        }
+                    }
+                } else {
+                    // At very high speeds, just show black screen (maximum performance)
+                    clear_rgba(frame, 10, 10, 15, 255);
                 }
             } else {
                 game.draw(frame);
@@ -590,8 +842,9 @@ fn main() -> Result<(), Error> {
                 
                 // Stagnation warning
                 if evo.epochs_without_improvement > 0 {
-                    let color = if evo.epochs_without_improvement > 400 { (255, 100, 100, 255) } else { (200, 200, 200, 255) };
-                    draw_text(frame, &format!("No improvement: {} epochs", evo.epochs_without_improvement), panel_x + 10, panel_y + 250, 2, color);
+                    let base_threshold = 1000 + (evo.restart_count * 500);
+                    let color = if evo.epochs_without_improvement > (base_threshold - 200) { (255, 100, 100, 255) } else { (200, 200, 200, 255) };
+                    draw_text(frame, &format!("No improvement: {}/{} (restarts: {})", evo.epochs_without_improvement, base_threshold, evo.restart_count), panel_x + 10, panel_y + 250, 2, color);
                 }
                 
                 draw_text(frame, &format!("EVO SPD: {} steps/frame (+/-)", evo_steps_per_frame), panel_x + 10, panel_y + 280, 2, (200, 220, 255, 255));
@@ -672,7 +925,7 @@ fn main() -> Result<(), Error> {
             // Speed controls (keyboard)
             if evo.training {
                 if input.key_pressed(VirtualKeyCode::NumpadAdd) || input.key_pressed(VirtualKeyCode::Equals) {
-                    evo_steps_per_frame = (evo_steps_per_frame.saturating_mul(2)).min(10_000);
+                    evo_steps_per_frame = (evo_steps_per_frame.saturating_mul(2)).min(100_000); // increased max from 10_000 to 100_000
                 }
                 if input.key_pressed(VirtualKeyCode::NumpadSubtract) || input.key_pressed(VirtualKeyCode::Minus) {
                     evo_steps_per_frame = (evo_steps_per_frame / 2).max(1);
@@ -705,7 +958,7 @@ fn main() -> Result<(), Error> {
                         let panel_x: u32 = 8; let panel_y: u32 = 8; let panel_w: u32 = 380; let btn_h: u32 = 32; let btn_w: u32 = panel_w - 16; let btn_x: u32 = panel_x + 8; let chart_y: u32 = panel_y + 310; let chart_h: u32 = 120; let btn1_y: u32 = chart_y + chart_h + 8; let btn2_y: u32 = btn1_y + btn_h + 6; let btn3_y: u32 = btn2_y + btn_h + 6; let btn4_y: u32 = btn3_y + btn_h + 6; let btn5_y: u32 = btn4_y + btn_h + 6;
                         if point_in_rect(mx, my, btn_x, btn1_y, btn_w, btn_h) { game.paused = !game.paused; }
                         else if point_in_rect(mx, my, btn_x, btn2_y, btn_w, btn_h) {
-                            if evo.training { evo_steps_per_frame = (evo_steps_per_frame.saturating_mul(2)).min(10_000); }
+                            if evo.training { evo_steps_per_frame = (evo_steps_per_frame.saturating_mul(2)).min(100_000); } // increased max from 10_000
                             else { manual_speed_delta_ms = (manual_speed_delta_ms - 10).max(-150); }
                         }
                         else if point_in_rect(mx, my, btn_x, btn3_y, btn_w, btn_h) { game = Game::new(); tick_duration = Duration::from_millis(150); }
@@ -758,10 +1011,33 @@ fn main() -> Result<(), Error> {
                         let died = was_alive && !g.alive;
                         let head1 = *g.snake.front().unwrap();
                         let d1 = (g.apple.x - head1.x).abs() + (g.apple.y - head1.y).abs();
-                        let mut reward = if died { -10.0 } else if ate { 10.0 } else { -0.01 };
+                        let length1 = g.snake.len();
+                        
+                        // Улучшенная система наград
+                        let mut reward = if died { 
+                            -10.0 
+                        } else if ate { 
+                            // Прогрессивная награда за яблоки (больше длина = больше награда)
+                            10.0 + (length1 as f32 * 0.1)
+                        } else { 
+                            // Мягкий штраф за время (не слишком строгий для длинных змей)
+                            -0.005
+                        };
+                        
+                        // Reward shaping: приближение к яблоку
                         if !died && !ate {
-                            if d1 < d0 { reward += 0.02; } else if d1 > d0 { reward -= 0.02; }
+                            if d1 < d0 { 
+                                reward += 0.05; // увеличено с 0.02
+                            } else if d1 > d0 { 
+                                reward -= 0.03; // небольшой штраф за удаление
+                            }
+                            
+                            // Дополнительная награда за эффективность (короткий путь)
+                            if d1 <= 3 && !ate {
+                                reward += 0.02; // близко к цели
+                            }
                         }
+                        
                         let ns = state_key(g);
                         agent.learn(s, a_idx, reward, ns, died || !g.alive);
                         agent.steps += 1;
@@ -785,7 +1061,23 @@ fn main() -> Result<(), Error> {
                         break;
                     }
                 }
-                window.request_redraw();
+                
+                // Update screen less frequently on high speeds to improve performance
+                frame_counter += 1;
+                let frames_to_skip = if evo_steps_per_frame >= 40_000 {
+                    10 // update screen every 10th iteration
+                } else if evo_steps_per_frame >= 20_000 {
+                    5 // update screen every 5th iteration
+                } else if evo_steps_per_frame >= 10_000 {
+                    2 // update screen every 2nd iteration
+                } else {
+                    1 // update every iteration
+                };
+                
+                if frame_counter >= frames_to_skip {
+                    frame_counter = 0;
+                    window.request_redraw();
+                }
                 return;
             }
 
@@ -843,21 +1135,29 @@ fn fill_cell_rgba(frame: &mut [u8], grid_x: u32, grid_y: u32, r: u8, g: u8, b: u
     let x=grid_x*GRID_SIZE; let y=grid_y*GRID_SIZE; fill_rect_rgba(frame, x, y, GRID_SIZE, GRID_SIZE, r,g,b,a);
 }
 
-fn draw_game_transparent(frame: &mut [u8], game: &Game, alpha: u8) {
+fn draw_game_transparent(frame: &mut [u8], game: &Game, alpha: u8, color: (u8, u8, u8)) {
     if !game.alive { return; }
     
     // Draw apple semi-transparent
     fill_cell_rgba(frame, game.apple.x as u32, game.apple.y as u32, 220, 50, 50, alpha);
     
-    // Draw snake semi-transparent
+    let (base_r, base_g, base_b) = color;
+    
+    // Draw snake with agent's color
     for (i, &pos) in game.snake.iter().enumerate() {
         if i == 0 {
-            // Head
-            fill_cell_rgba(frame, pos.x as u32, pos.y as u32, 100, 255, 100, alpha);
+            // Head - brighter version of agent's color
+            let bright_r = (base_r as u16 * 130 / 100).min(255) as u8;
+            let bright_g = (base_g as u16 * 130 / 100).min(255) as u8;
+            let bright_b = (base_b as u16 * 130 / 100).min(255) as u8;
+            fill_cell_rgba(frame, pos.x as u32, pos.y as u32, bright_r, bright_g, bright_b, alpha);
         } else {
-            // Body with gradient
-            let brightness = 200 - (i * 10).min(100) as u8;
-            fill_cell_rgba(frame, pos.x as u32, pos.y as u32, 50, brightness, 50, alpha);
+            // Body with gradient - darker with distance from head
+            let fade = 1.0 - (i as f32 * 0.015).min(0.5);
+            let body_r = (base_r as f32 * fade) as u8;
+            let body_g = (base_g as f32 * fade) as u8;
+            let body_b = (base_b as f32 * fade) as u8;
+            fill_cell_rgba(frame, pos.x as u32, pos.y as u32, body_r, body_g, body_b, alpha);
         }
     }
 }
