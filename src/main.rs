@@ -34,6 +34,8 @@ use winit::window::WindowBuilder;
 use winit_input_helper::WinitInputHelper;
 use serde::{Serialize, Deserialize};
 use ahash::AHashMap;
+use rayon::prelude::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 600;
@@ -613,6 +615,19 @@ impl EvoTrainer {
                 agent.color = fresh_colors[i];
                 new_pop.push(agent);
             }
+
+            // 4. Дозаполняем популяцию до целевого размера
+            if new_pop.len() < self.pop_size {
+                let remaining = self.pop_size - new_pop.len();
+                let extra_colors = generate_population_colors(remaining);
+                for i in 0..remaining {
+                    let mut agent = QAgent::new();
+                    agent.color = extra_colors[i];
+                    new_pop.push(agent);
+                }
+            } else if new_pop.len() > self.pop_size {
+                new_pop.truncate(self.pop_size);
+            }
         }
         
         self.pop = new_pop;
@@ -845,15 +860,17 @@ fn main() -> Result<(), Error> {
                     
                     // Draw all individuals only if speed is low (for better performance at high speeds)
                     if evo_steps_per_frame < 10_000 {
-                        for (i, g) in evo.games.iter().enumerate() {
-                            let agent_color = evo.pop[i].color;
+                        for (agent, g) in evo.pop.iter().zip(evo.games.iter()) {
+                            let agent_color = agent.color;
                             draw_game_transparent(frame, g, 180, agent_color); // увеличена непрозрачность до 180
                         }
                     } else {
                         // At high speeds, just draw the best performing individual
                         if let Some(best_game_idx) = evo.scores.iter().enumerate().max_by_key(|(_, score)| *score).map(|(idx, _)| idx) {
-                            let agent_color = evo.pop[best_game_idx].color;
-                            draw_game_transparent(frame, &evo.games[best_game_idx], 220, agent_color); // более непрозрачный
+                            if best_game_idx < evo.pop.len() && best_game_idx < evo.games.len() {
+                                let agent_color = evo.pop[best_game_idx].color;
+                                draw_game_transparent(frame, &evo.games[best_game_idx], 220, agent_color); // более непрозрачный
+                            }
                         }
                     }
                 } else {
@@ -1048,75 +1065,69 @@ fn main() -> Result<(), Error> {
                 }
             }
 
-            // Evolutionary training loop (population of agents - all run in parallel)
+            // Evolutionary training loop (population of agents - parallelized with rayon)
             if evo.training {
                 let steps_per_frame: u32 = evo_steps_per_frame.max(1);
                 if game.paused { window.request_redraw(); return; }
                 
                 for _ in 0..steps_per_frame {
                     let mut all_done = true;
-                    
-                    // Update all individuals in parallel
-                    for i in 0..evo.pop_size {
-                        let g = &mut evo.games[i];
-                        if !g.alive || evo.scores[i] >= evo.target_score {
-                            continue; // skip finished individuals
-                        }
-                        all_done = false;
-                        
-                        let agent = &mut evo.pop[i];
-                        let s = state_key(g);
-                        let a_idx = agent.select_action(s, &mut rng);
-                        g.change_dir(dir_after_action(g.dir, a_idx));
-                        let before_score = g.score;
-                        let was_alive = g.alive;
-                        let head0 = *g.snake.front().unwrap();
-                        let d0 = (g.apple.x - head0.x).abs() + (g.apple.y - head0.y).abs();
-                        g.update();
-                        let ate = g.score > before_score;
-                        let died = was_alive && !g.alive;
-                        let head1 = *g.snake.front().unwrap();
-                        let d1 = (g.apple.x - head1.x).abs() + (g.apple.y - head1.y).abs();
-                        let length1 = g.snake.len();
-                        
-                        // Улучшенная система наград
-                        let mut reward = if died { 
-                            -10.0 
-                        } else if ate { 
-                            // Прогрессивная награда за яблоки (больше длина = больше награда)
-                            10.0 + (length1 as f32 * 0.1)
-                        } else { 
-                            // Мягкий штраф за время (не слишком строгий для длинных змей)
-                            -0.005
-                        };
-                        
-                        // Reward shaping: приближение к яблоку
-                        if !died && !ate {
-                            if d1 < d0 { 
-                                reward += 0.05; // увеличено с 0.02
-                            } else if d1 > d0 { 
-                                reward -= 0.03; // небольшой штраф за удаление
+                    let target_score = evo.target_score;
+                    let len = evo.pop.len().min(evo.games.len()).min(evo.scores.len());
+                    // Parallel iterate zipped mutable slices safely
+                    let (pop_slice, _) = evo.pop.split_at_mut(len);
+                    let (games_slice, _) = evo.games.split_at_mut(len);
+                    let (scores_slice, _) = evo.scores.split_at_mut(len);
+                    let solved_flag = AtomicBool::new(false);
+
+                    pop_slice
+                        .par_iter_mut()
+                        .zip(games_slice.par_iter_mut())
+                        .zip(scores_slice.par_iter_mut())
+                        .for_each(|((agent, g), score_ref)| {
+                            if !g.alive || *score_ref >= target_score {
+                                return;
                             }
-                            
-                            // Дополнительная награда за эффективность (короткий путь)
-                            if d1 <= 3 && !ate {
-                                reward += 0.02; // близко к цели
+                            // local RNG per thread
+                            let mut local_rng = rand::thread_rng();
+                            let s = state_key(g);
+                            let a_idx = agent.select_action(s, &mut local_rng);
+                            g.change_dir(dir_after_action(g.dir, a_idx));
+                            let before_score = g.score;
+                            let was_alive = g.alive;
+                            let head0 = *g.snake.front().unwrap();
+                            let d0 = (g.apple.x - head0.x).abs() + (g.apple.y - head0.y).abs();
+                            g.update();
+                            let ate = g.score > before_score;
+                            let died = was_alive && !g.alive;
+                            let head1 = *g.snake.front().unwrap();
+                            let d1 = (g.apple.x - head1.x).abs() + (g.apple.y - head1.y).abs();
+                            let length1 = g.snake.len();
+
+                            let mut reward = if died { -10.0 } else if ate { 10.0 + (length1 as f32 * 0.1) } else { -0.005 };
+                            if !died && !ate {
+                                if d1 < d0 { reward += 0.05; } else if d1 > d0 { reward -= 0.03; }
+                                if d1 <= 3 && !ate { reward += 0.02; }
                             }
-                        }
-                        
-                        let ns = state_key(g);
-                        agent.learn(s, a_idx, reward, ns, died || !g.alive);
-                        agent.steps += 1;
-                        if died { 
-                            agent.episodes += 1; 
-                            agent.epsilon = (agent.epsilon * agent.decay).max(agent.min_epsilon);
-                        }
-                        if g.alive {
-                            evo.scores[i] = g.score;
-                        }
-                        if g.score >= evo.target_score {
-                            evo.solved = true;
-                            evo.training = false;
+
+                            let ns = state_key(g);
+                            agent.learn(s, a_idx, reward, ns, died || !g.alive);
+                            agent.steps += 1;
+                            if died {
+                                agent.episodes += 1;
+                                agent.epsilon = (agent.epsilon * agent.decay).max(agent.min_epsilon);
+                            }
+                            if g.alive { *score_ref = g.score; }
+                            if g.score >= target_score { solved_flag.store(true, Ordering::Relaxed); }
+                        });
+
+                    if solved_flag.load(Ordering::Relaxed) {
+                        evo.solved = true;
+                        evo.training = false;
+                    } else {
+                        // If any alive remains, not all done
+                        if scores_slice.iter().zip(games_slice.iter()).any(|(s, g)| g.alive && *s < target_score) {
+                            all_done = false;
                         }
                     }
                     
