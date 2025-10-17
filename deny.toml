@@ -1,0 +1,70 @@
+# cargo-deny configuration
+# Docs: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# Skip dev-dependencies for license/advisory checks in release builds
+# (CI job can choose to include them if desired)
+all-features = false
+no-default-features = false
+features = []
+
+[advisories]
+# Audit RustSec advisories
+vulnerability = "deny"
+unmaintained = "warn"
+yanked = "warn"
+notice = "warn"
+# You can curate an ignore list per-advisory ID here, with notes and expiry
+# ignore = [
+#   { id = "RUSTSEC-2020-0071", reason = "transitive via X, not used at runtime", until = "2026-01-01" }
+# ]
+
+[licenses]
+# Allowlist common permissive and weak-copyleft licenses
+allow = [
+  "MIT", "Apache-2.0", "BSD-3-Clause", "BSD-2-Clause",
+  "ISC", "Zlib", "Unicode-DFS-2016", "CC0-1.0",
+]
+# Deny GPL family by default; add exceptions in exceptions list if needed
+# You can change to "copyleft" = "deny" for more granularity
+copyleft = "deny"
+# Treat unknown/ambiguous license as a failure
+unlicensed = "deny"
+# If multiple licenses, require that at least one is in allow
+allow-osi-fsf-free = "both"
+
+[licenses.private]
+# If you have private crates in a workspace, configure as needed
+ignore = false
+
+[licenses.exceptions]
+# Example:
+# [[licenses.exceptions]]
+# name = "some-crate"
+# allow = ["GPL-3.0-only"]
+
+[bans]
+# Detect multiple versions of the same crate
+multiple-versions = "warn"
+# Deny wildcard dependencies like foo = "*"
+wildcards = "deny"
+# Explicit allows if needed:
+# allow = [
+#   { name = "time", version = "0.3" },
+# ]
+
+[sources]
+# Forbid git dependencies by default in releases (prefer crates.io)
+unknown-registry = "deny"
+unknown-git = "deny"
+# Allow crates.io
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Allow specific git sources if needed
+# allow-git = ["https://github.com/your-org/your-repo.git"]
+
+[deny]
+# Aggregate section to turn selected warnings into deny
+warnings = [
+  # treat yanked crates as deny in CI
+  # "advisories.yanked",
+]
