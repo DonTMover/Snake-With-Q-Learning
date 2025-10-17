@@ -21,6 +21,9 @@
 //! - Rewards: +apple, -death, small step cost, shaping for distance improvement
 //! - Evolution: elitism, mutation, and staged restarts on stagnation
 
+#[cfg(feature = "gpu-nn")]
+mod gpu_nn;
+
 use ahash::AHashMap;
 use pixels::{Error, Pixels, SurfaceTexture};
 use rand::Rng;
@@ -953,6 +956,9 @@ fn main() -> Result<(), Error> {
     #[cfg(feature = "gpu-nn")]
     {
         println!("[mode] GPU NN feature enabled (scaffold) — current trainer remains Q-table CPU");
+        // Example: initialize trainer for future use
+        // Inputs/outputs are placeholders; will be aligned with actual state/action space
+        let _maybe_gpu_trainer = gpu_nn::GpuTrainer::new(256, 128, 3);
     }
     let event_loop = EventLoop::new();
     let mut input = WinitInputHelper::new();
@@ -972,6 +978,10 @@ fn main() -> Result<(), Error> {
 
     let mut game = Game::new();
     let mut evo = EvoTrainer::new(24); // увеличенная популяция для более быстрого поиска решений
+    #[cfg(feature = "gpu-nn")]
+    let mut nn_mode: bool = false;
+    #[cfg(feature = "gpu-nn")]
+    let mut nn_trainer: Option<gpu_nn::GpuTrainer> = Some(gpu_nn::GpuTrainer::new(256, 128, 3));
 
     // Try to load saved agent and auto-start training if found
     let save_path = "snake_agent.json";
@@ -1165,6 +1175,18 @@ fn main() -> Result<(), Error> {
                     2,
                     (200, 200, 200, 255),
                 );
+                #[cfg(feature = "gpu-nn")]
+                {
+                    let nn_label = if nn_mode { "ON" } else { "OFF" };
+                    draw_text(
+                        frame,
+                        &format!("NN MODE [N]: {}", nn_label),
+                        panel_x + 10,
+                        panel_y + 100,
+                        2,
+                        (180, 220, 180, 255),
+                    );
+                }
                 // Speed indicator (based on tick duration)
                 let ms = tick_duration.as_millis() as f32;
                 let sps = if ms > 0.0 { 1000.0 / ms } else { 0.0 };
@@ -1429,6 +1451,17 @@ fn main() -> Result<(), Error> {
             // Toggle panel visibility
             if input.key_pressed(VirtualKeyCode::H) {
                 panel_visible = !panel_visible;
+            }
+            #[cfg(feature = "gpu-nn")]
+            {
+                if input.key_pressed(VirtualKeyCode::N) {
+                    nn_mode = !nn_mode;
+                    if nn_mode {
+                        println!("[gpu-nn] Enabled NN mode (experimental)");
+                    } else {
+                        println!("[gpu-nn] Disabled NN mode");
+                    }
+                }
             }
             // Ultra-fast toggle
             if input.key_pressed(VirtualKeyCode::U) {

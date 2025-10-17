@@ -6,7 +6,7 @@ edition = "2024"
 [features]
 # GPU-backed neural network trainer (burn/wgpu) — scaffold only for now.
 # Enable with: cargo build --features gpu-nn
-gpu-nn = []
+gpu-nn = ["dep:burn", "dep:burn-wgpu"]
 
 [dependencies]
 pixels = "0.13"
@@ -19,4 +19,8 @@ ahash = { version = "0.8", features = ["serde"] }
 rayon = "1.10"
 wgpu = "0.16"
 pollster = "0.3"
+
+# Optional: GPU NN backend (disabled by default)
+burn = { version = "0.14", optional = true, default-features = false }
+burn-wgpu = { version = "0.14", optional = true, default-features = false }
 
