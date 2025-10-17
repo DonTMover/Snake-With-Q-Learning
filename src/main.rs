@@ -950,6 +950,10 @@ fn state_key(game: &Game) -> u32 {
 /// Entry point: sets up the window, renderer, input loop, and optionally runs
 /// evolutionary training.
 fn main() -> Result<(), Error> {
+    #[cfg(feature = "gpu-nn")]
+    {
+        println!("[mode] GPU NN feature enabled (scaffold) — current trainer remains Q-table CPU");
+    }
     let event_loop = EventLoop::new();
     let mut input = WinitInputHelper::new();
 

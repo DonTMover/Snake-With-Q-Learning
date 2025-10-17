@@ -3,6 +3,11 @@ name = "Snake-With-Q-Learning"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# GPU-backed neural network trainer (burn/wgpu) — scaffold only for now.
+# Enable with: cargo build --features gpu-nn
+gpu-nn = []
+
 [dependencies]
 pixels = "0.13"
 winit = "0.28"
