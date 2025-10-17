@@ -38,7 +38,7 @@ use serde::{Serialize, Deserialize};
 use ahash::AHashMap;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
-use wgpu::{Instance, Backends, RequestAdapterOptions, PowerPreference};
+use wgpu::{Instance, Backends, PowerPreference};
 
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 600;
@@ -68,6 +68,10 @@ enum Dir {
 }
 
 
+/// Cause of death for reward shaping.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeathCause { None, Wall, SelfCollision }
+
 /// Game state: snake body, apple, direction, score and flags.
 struct Game {
     snake: VecDeque<Pos>,
@@ -77,6 +81,7 @@ struct Game {
     alive: bool,
     score: usize,
     paused: bool,
+    last_death: DeathCause,
 }
 
 impl Game {
@@ -101,6 +106,7 @@ impl Game {
             score: 0,
             paused: false,
             snake_set,
+            last_death: DeathCause::None,
         };
         game.place_apple();
         game
@@ -126,6 +132,9 @@ impl Game {
             return;
         }
 
+        // reset death cause at the start of a tick
+        self.last_death = DeathCause::None;
+
         let head = self.snake.front().unwrap();
         let new_head = match self.dir {
             Dir::Up => Pos::new(head.x, head.y - 1),
@@ -140,12 +149,14 @@ impl Game {
             || new_head.y < 0
             || new_head.y >= GRID_HEIGHT as i32
         {
+            self.last_death = DeathCause::Wall;
             self.alive = false;
             return;
         }
 
         // Check collision with self (tail collision disallowed like before)
         if self.snake_set.contains(&new_head) {
+            self.last_death = DeathCause::SelfCollision;
             self.alive = false;
             return;
         }
@@ -416,7 +427,7 @@ impl EvoTrainer {
     }
 
     /// Reproduce a new generation with elitism, mutation, and adaptive restarts.
-    fn reproduce(&mut self, rng: &mut rand::rngs::ThreadRng, save_path: &str) {
+    fn reproduce<R: Rng + ?Sized>(&mut self, rng: &mut R, save_path: &str) {
         let mut idxs: Vec<usize> = (0..self.pop_size).collect();
         idxs.sort_by_key(|&i| std::cmp::Reverse(self.scores[i]));
         let best_idx = *idxs.first().unwrap_or(&0);
@@ -640,7 +651,7 @@ impl EvoTrainer {
 }
 
 /// Mutate Q-values and decay epsilon slightly; `sigma` controls noise magnitude.
-fn mutate_qagent(agent: &mut QAgent, rng: &mut rand::rngs::ThreadRng, sigma: f32) {
+fn mutate_qagent<R: Rng + ?Sized>(agent: &mut QAgent, rng: &mut R, sigma: f32) {
     for arr in agent.q.values_mut() {
         for v in arr.iter_mut() { *v += rng.gen_range(-sigma..sigma); }
     }
@@ -821,7 +832,7 @@ fn main() -> Result<(), Error> {
         println!("🚀 Auto-starting evolution with loaded agent");
     }
     
-    let mut rng = rand::thread_rng();
+    let mut rng: SmallRng = SmallRng::from_entropy();
     let mut last_update = Instant::now();
     let mut tick_duration = Duration::from_millis(150);
     let mut manual_speed_delta_ms: i32 = 0;
@@ -837,9 +848,12 @@ fn main() -> Result<(), Error> {
     let mut gpu_available: bool = false;
     let mut gpu_enabled: bool = false;
     {
-        let instance = Instance::new(wgpu::InstanceDescriptor{backends: Backends::VULKAN | Backends::DX12 | Backends::GL, ..Default::default()});
-        let options = RequestAdapterOptions { power_preference: PowerPreference::HighPerformance, compatible_surface: None, force_fallback_adapter: false };
-        if let Some(_adapter) = pollster::block_on(instance.request_adapter(&options)) {
+        let instance = Instance::new(wgpu::InstanceDescriptor { backends: Backends::all(), ..Default::default() });
+        if let Some(_adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        })) {
             gpu_available = true;
             gpu_enabled = true;
             max_steps_per_tick = 80_000;
@@ -933,8 +947,8 @@ fn main() -> Result<(), Error> {
                 let btn_h: u32 = 32; // increased button height
                 let btn_w: u32 = panel_w - 16;
                 let btn_x: u32 = panel_x + 8;
-                // Chart area inside panel
-                let chart_y: u32 = panel_y + 310; // moved down for stagnation info
+                // Chart area inside panel (positioned below HUD option lines)
+                let chart_y: u32 = panel_y + 340; // moved further down to avoid text overlap
                 let chart_h: u32 = 120; // increased chart height
                 let btn1_y: u32 = chart_y + chart_h + 8; // start buttons after chart
                 let btn2_y: u32 = btn1_y + btn_h + 6;
@@ -991,7 +1005,10 @@ fn main() -> Result<(), Error> {
                 }
                 
                 let ultra_str = if ultra_fast { "ON" } else { "OFF" };
-                draw_text(frame, &format!("EVO SPD: {} steps/frame (+/-)  ULTRA (U): {}", evo_steps_per_frame, ultra_str), panel_x + 10, panel_y + 300, 2, (200, 220, 255, 255));
+                let best_str = if show_only_best { "ON" } else { "OFF" };
+                // Split into two lines to keep within panel width
+                draw_text(frame, &format!("EVO SPD: {} steps/frame (+/-)", evo_steps_per_frame), panel_x + 10, panel_y + 300, 2, (200, 220, 255, 255));
+                draw_text(frame, &format!("ULTRA (U): {}    BEST (B): {}", ultra_str, best_str), panel_x + 10, panel_y + 320, 2, (200, 220, 255, 255));
                 // Chart of best apples per epoch
                 draw_chart(frame, panel_x + 10, chart_y, panel_w - 20, chart_h, &evo.epoch_best);
 
@@ -1205,7 +1222,18 @@ fn main() -> Result<(), Error> {
                             let d1 = (g.apple.x - head1.x).abs() + (g.apple.y - head1.y).abs();
                             let length1 = g.snake.len();
 
-                            let mut reward = if died { -10.0 } else if ate { 10.0 + (length1 as f32 * 0.1) } else { -0.005 };
+                            // Death penalties: self-collision is the heaviest crime
+                            let mut reward = if died {
+                                match g.last_death {
+                                    DeathCause::SelfCollision => -30.0,
+                                    DeathCause::Wall => -15.0,
+                                    DeathCause::None => -12.0,
+                                }
+                            } else if ate {
+                                10.0 + (length1 as f32 * 0.1)
+                            } else {
+                                -0.005
+                            };
                             if !died && !ate {
                                 if d1 < d0 { reward += 0.05; } else if d1 > d0 { reward -= 0.03; }
                                 if d1 <= 3 && !ate { reward += 0.02; }
