@@ -65,7 +65,6 @@ jobs:
     name: Windows Build/Release
     runs-on: windows-latest
     needs: [test]
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -80,20 +79,31 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: Build release
         run: cargo build --release
-      - name: Create GitHub Release
+      - name: Create GitHub Release (tagged)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: target/release/Snake_With_Q_Learning.exe
+          files: target/release/*.exe
           tag_name: ${{ github.ref_name }}
           name: Snake-With-Q-Learning ${{ github.ref_name }}
           draft: false
           prerelease: false
+      - name: Create/Update rolling prerelease (latest)
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/release/*.exe
+          tag_name: latest
+          target_commitish: ${{ github.sha }}
+          name: Snake-With-Q-Learning latest
+          draft: false
+          prerelease: true
+          make_latest: false
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: Snake-With-Q-Learning-windows-x86_64
-          path: target/release/Snake_With_Q_Learning.exe
+          path: target/release/*.exe
 
   cut-release:
     name: Cut Release (bump version and tag)
