@@ -176,10 +176,8 @@ impl Game {
         if new_head == self.apple {
             self.score += 1;
             self.place_apple();
-        } else {
-            if let Some(tail) = self.snake.pop_back() {
-                self.snake_set.remove(&tail);
-            }
+        } else if let Some(tail) = self.snake.pop_back() {
+            self.snake_set.remove(&tail);
         }
     }
 
@@ -429,8 +427,7 @@ impl EvoTrainer {
         // Генерируем уникальные цвета для каждого агента в популяции
         let colors = generate_population_colors(pop_size);
 
-        for i in 0..pop_size {
-            let (r, g, b) = colors[i];
+        for &(r, g, b) in colors.iter().take(pop_size) {
             pop.push(QAgent::new_with_color(r, g, b));
             games.push(Game::new());
         }
@@ -486,9 +483,9 @@ impl EvoTrainer {
         let colors = generate_population_colors(self.pop_size);
 
         // Replace all agents with the loaded one + assign colors
-        for i in 0..self.pop_size {
-            self.pop[i] = agent.clone();
-            self.pop[i].color = colors[i]; // устанавливаем уникальный цвет
+        for (p, &color) in self.pop.iter_mut().zip(colors.iter()).take(self.pop_size) {
+            *p = agent.clone();
+            p.color = color; // устанавливаем уникальный цвет
         }
         Ok(())
     }
@@ -587,9 +584,9 @@ impl EvoTrainer {
                     // Add more fresh random agents (50%) with new colors
                     let remaining = self.pop_size - new_pop.len();
                     let new_colors = generate_population_colors(remaining);
-                    for i in 0..remaining {
+                    for &color in new_colors.iter() {
                         let mut agent = QAgent::new();
-                        agent.color = new_colors[i];
+                        agent.color = color;
                         new_pop.push(agent);
                     }
                 }
@@ -607,9 +604,9 @@ impl EvoTrainer {
                     // Add fresh random agents (70%) with new colors
                     let remaining = self.pop_size - new_pop.len();
                     let new_colors = generate_population_colors(remaining);
-                    for i in 0..remaining {
+                    for &color in new_colors.iter() {
                         let mut agent = QAgent::new();
-                        agent.color = new_colors[i];
+                        agent.color = color;
                         new_pop.push(agent);
                     }
                 }
@@ -627,9 +624,9 @@ impl EvoTrainer {
                     // Add mostly fresh random agents (80%) with new colors
                     let remaining = self.pop_size - new_pop.len();
                     let new_colors = generate_population_colors(remaining);
-                    for i in 0..remaining {
+                    for &color in new_colors.iter() {
                         let mut agent = QAgent::new();
-                        agent.color = new_colors[i];
+                        agent.color = color;
                         new_pop.push(agent);
                     }
                 }
@@ -647,10 +644,10 @@ impl EvoTrainer {
                     // Add mostly fresh random agents (90%) with new colors + boost
                     let remaining = self.pop_size - new_pop.len();
                     let new_colors = generate_population_colors(remaining);
-                    for i in 0..remaining {
+                    for &color in new_colors.iter() {
                         let mut agent = QAgent::new();
                         agent.boost_exploration(); // boost fresh agents too
-                        agent.color = new_colors[i];
+                        agent.color = color;
                         new_pop.push(agent);
                     }
                 }
@@ -674,8 +671,8 @@ impl EvoTrainer {
             let top_k = 3.min(self.pop_size);
 
             // 1. Elitism: keep top 3 unchanged (30%)
-            for i in 0..top_k {
-                new_pop.push(self.pop[idxs[i]].clone());
+            for &idx in idxs.iter().take(top_k) {
+                new_pop.push(self.pop[idx].clone());
             }
 
             // 2. Создаём 4 детей от элиты с мутациями и смешением цветов (40%)
@@ -710,9 +707,9 @@ impl EvoTrainer {
             let num_fresh = 3.min(self.pop_size - new_pop.len());
             let fresh_colors = generate_population_colors(num_fresh);
 
-            for i in 0..num_fresh {
+            for &color in fresh_colors.iter().take(num_fresh) {
                 let mut agent = QAgent::new();
-                agent.color = fresh_colors[i];
+                agent.color = color;
                 new_pop.push(agent);
             }
 
@@ -720,9 +717,9 @@ impl EvoTrainer {
             if new_pop.len() < self.pop_size {
                 let remaining = self.pop_size - new_pop.len();
                 let extra_colors = generate_population_colors(remaining);
-                for i in 0..remaining {
+                for &color in extra_colors.iter().take(remaining) {
                     let mut agent = QAgent::new();
-                    agent.color = extra_colors[i];
+                    agent.color = color;
                     new_pop.push(agent);
                 }
             } else if new_pop.len() > self.pop_size {
@@ -1046,16 +1043,16 @@ fn main() -> Result<(), Error> {
                         .enumerate()
                         .max_by_key(|(_, score)| *score)
                         .map(|(idx, _)| idx)
+                        && best_game_idx < evo.pop.len()
+                        && best_game_idx < evo.games.len()
                     {
-                        if best_game_idx < evo.pop.len() && best_game_idx < evo.games.len() {
-                            let agent_color = evo.pop[best_game_idx].color;
-                            draw_game_transparent(
-                                frame,
-                                &evo.games[best_game_idx],
-                                220,
-                                agent_color,
-                            );
-                        }
+                        let agent_color = evo.pop[best_game_idx].color;
+                        draw_game_transparent(
+                            frame,
+                            &evo.games[best_game_idx],
+                            220,
+                            agent_color,
+                        );
                     }
                 } else if evo_steps_per_frame < 8_192 {
                     // Low/medium speed: draw grid + agents
@@ -1088,24 +1085,22 @@ fn main() -> Result<(), Error> {
                             let agent_color = agent.color;
                             draw_game_transparent(frame, g, 180, agent_color);
                         }
-                    } else {
-                        if let Some(best_game_idx) = evo
-                            .scores
-                            .iter()
-                            .enumerate()
-                            .max_by_key(|(_, score)| *score)
-                            .map(|(idx, _)| idx)
-                        {
-                            if best_game_idx < evo.pop.len() && best_game_idx < evo.games.len() {
-                                let agent_color = evo.pop[best_game_idx].color;
-                                draw_game_transparent(
-                                    frame,
-                                    &evo.games[best_game_idx],
-                                    220,
-                                    agent_color,
-                                );
-                            }
-                        }
+                    } else if let Some(best_game_idx) = evo
+                        .scores
+                        .iter()
+                        .enumerate()
+                        .max_by_key(|(_, score)| *score)
+                        .map(|(idx, _)| idx)
+                        && best_game_idx < evo.pop.len()
+                        && best_game_idx < evo.games.len()
+                    {
+                        let agent_color = evo.pop[best_game_idx].color;
+                        draw_game_transparent(
+                            frame,
+                            &evo.games[best_game_idx],
+                            220,
+                            agent_color,
+                        );
                     }
                 } else if evo_steps_per_frame < 20_000 {
                     // High speed: skip grid entirely; draw best only on plain background
@@ -1116,16 +1111,16 @@ fn main() -> Result<(), Error> {
                         .enumerate()
                         .max_by_key(|(_, score)| *score)
                         .map(|(idx, _)| idx)
+                        && best_game_idx < evo.pop.len()
+                        && best_game_idx < evo.games.len()
                     {
-                        if best_game_idx < evo.pop.len() && best_game_idx < evo.games.len() {
-                            let agent_color = evo.pop[best_game_idx].color;
-                            draw_game_transparent(
-                                frame,
-                                &evo.games[best_game_idx],
-                                220,
-                                agent_color,
-                            );
-                        }
+                        let agent_color = evo.pop[best_game_idx].color;
+                        draw_game_transparent(
+                            frame,
+                            &evo.games[best_game_idx],
+                            220,
+                            agent_color,
+                        );
                     }
                 } else {
                     // Ultra-high speed: don't render agents at all
@@ -1389,14 +1384,13 @@ fn main() -> Result<(), Error> {
         }
 
         // Handle window resize
-        if let Event::WindowEvent { event, .. } = &event {
-            if let winit::event::WindowEvent::Resized(new_size) = event {
-                if let Err(e) = pixels.resize_surface(new_size.width, new_size.height) {
-                    eprintln!("Failed to resize surface: {}", e);
-                    *control_flow = ControlFlow::Exit;
-                    return;
-                }
-            }
+        if let Event::WindowEvent { event, .. } = &event
+            && let winit::event::WindowEvent::Resized(new_size) = event
+            && let Err(e) = pixels.resize_surface(new_size.width, new_size.height)
+        {
+            eprintln!("Failed to resize surface: {}", e);
+            *control_flow = ControlFlow::Exit;
+            return;
         }
 
         if input.update(&event) {
@@ -1453,15 +1447,15 @@ fn main() -> Result<(), Error> {
                 max_steps_per_tick = if ultra_fast { 50_000 } else { 1500 };
             }
             // Toggle GPU acceleration mode (just adjusts training budget for now)
-            if input.key_pressed(VirtualKeyCode::G) {
-                if gpu_available {
-                    gpu_enabled = !gpu_enabled;
-                    max_steps_per_tick = if gpu_enabled {
-                        80_000
-                    } else {
-                        if ultra_fast { 50_000 } else { 1500 }
-                    };
-                }
+            if input.key_pressed(VirtualKeyCode::G) && gpu_available {
+                gpu_enabled = !gpu_enabled;
+                max_steps_per_tick = if gpu_enabled {
+                    80_000
+                } else if ultra_fast {
+                    50_000
+                } else {
+                    1500
+                };
             }
             if input.key_pressed(VirtualKeyCode::B) {
                 show_only_best = !show_only_best;
@@ -1507,10 +1501,9 @@ fn main() -> Result<(), Error> {
             }
 
             // Mouse clicks on overlay buttons
-            if let Some((mx, my)) = input.mouse() {
-                if input.mouse_pressed(0) {
-                    let mx = mx as u32;
-                    let my = my as u32;
+            if let Some((mx, my)) = input.mouse() && input.mouse_pressed(0) {
+                let mx = mx as u32;
+                let my = my as u32;
 
                     if panel_visible {
                         let panel_x: u32 = 8;
@@ -1562,7 +1555,6 @@ fn main() -> Result<(), Error> {
                             panel_visible = true;
                         }
                     }
-                }
             }
 
             // Evolutionary training loop (population of agents - parallelized with rayon)
@@ -1653,16 +1645,14 @@ fn main() -> Result<(), Error> {
                     if solved_flag.load(Ordering::Relaxed) {
                         evo.solved = true;
                         evo.training = false;
-                    } else {
-                        // If any alive remains, not all done
-                        if scores_slice
-                            .iter()
-                            .zip(games_slice.iter())
-                            .any(|(s, g)| g.alive && *s < target_score)
-                        {
-                            all_done = false;
-                        }
+                    } else if scores_slice
+                        .iter()
+                        .zip(games_slice.iter())
+                        .any(|(s, g)| g.alive && *s < target_score)
+                    {
+                        all_done = false;
                     }
+
                     // Determine if there is a unique leading agent who should bypass the step limit
                     let (mut top1, mut top2, mut top1_idx) = (0usize, 0usize, None::<usize>);
                     for (i, &sc) in evo.scores.iter().enumerate() {
@@ -1770,6 +1760,7 @@ fn blend_pixel(frame: &mut [u8], x: u32, y: u32, r: u8, g: u8, b: u8, a: u8) {
 }
 
 /// Fill an axis-aligned rectangle with an RGBA color (alpha-blended per pixel).
+#[allow(clippy::too_many_arguments)]
 fn fill_rect_rgba(frame: &mut [u8], x: u32, y: u32, w: u32, h: u32, r: u8, g: u8, b: u8, a: u8) {
     let x2 = (x + w).min(WIDTH);
     let y2 = (y + h).min(HEIGHT);
@@ -1781,6 +1772,7 @@ fn fill_rect_rgba(frame: &mut [u8], x: u32, y: u32, w: u32, h: u32, r: u8, g: u8
 }
 
 /// Draw a rectangle border with an RGBA color.
+#[allow(clippy::too_many_arguments)]
 fn stroke_rect_rgba(frame: &mut [u8], x: u32, y: u32, w: u32, h: u32, r: u8, g: u8, b: u8, a: u8) {
     if w == 0 || h == 0 {
         return;
