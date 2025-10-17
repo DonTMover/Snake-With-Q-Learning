@@ -59,7 +59,7 @@ impl Pos {
 }
 
 /// Snake movement direction.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Dir {
     Up,
     Down,
@@ -69,7 +69,7 @@ enum Dir {
 
 
 /// Cause of death for reward shaping.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum DeathCause { None, Wall, SelfCollision }
 
 /// Game state: snake body, apple, direction, score and flags.
@@ -1485,5 +1485,74 @@ fn draw_chart(frame: &mut [u8], x: u32, y: u32, w: u32, h: u32, data: &[usize]) 
         let bx = x + 1 + i as u32 * bar_w;
         let by = y + h - 1 - bh;
         fill_rect_rgba(frame, bx, by, bar_w - 1, bh, 120, 180, 255, 160);
+    }
+}
+
+// ============================
+// Tests
+// ============================
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_dir_rotation() {
+        assert_eq!(left_dir(Dir::Up), Dir::Left);
+        assert_eq!(right_dir(Dir::Up), Dir::Right);
+        assert_eq!(left_dir(Dir::Right), Dir::Up);
+        assert_eq!(right_dir(Dir::Left), Dir::Up);
+    }
+
+    #[test]
+    fn test_dir_after_action() {
+        assert_eq!(dir_after_action(Dir::Up, 0), Dir::Left);
+        assert_eq!(dir_after_action(Dir::Up, 1), Dir::Up);
+        assert_eq!(dir_after_action(Dir::Up, 2), Dir::Right);
+    }
+
+    #[test]
+    fn test_wall_death_cause() {
+        let mut g = Game::new();
+        // Place head at left edge and move left to hit wall
+        g.snake.clear();
+        g.snake_set.clear();
+        g.snake.push_front(Pos::new(0, 5));
+        g.snake_set.insert(Pos::new(0, 5));
+        g.dir = Dir::Left;
+        g.update();
+        assert!(!g.alive);
+        assert_eq!(g.last_death, DeathCause::Wall);
+    }
+
+    #[test]
+    fn test_self_collision_death_cause() {
+        let mut g = Game::new();
+        // Create a body segment in front of the head to force self-collision
+        g.snake.clear();
+        g.snake_set.clear();
+        g.snake.push_front(Pos::new(2, 2)); // head
+        g.snake.push_back(Pos::new(3, 2));  // body directly to the right
+        g.snake_set.insert(Pos::new(2, 2));
+        g.snake_set.insert(Pos::new(3, 2));
+        g.dir = Dir::Right; // move into (3,2)
+        g.update();
+        assert!(!g.alive);
+        assert_eq!(g.last_death, DeathCause::SelfCollision);
+    }
+
+    #[test]
+    fn test_evo_reproduce_keeps_population_size() {
+        let mut evo = EvoTrainer::new(24);
+        // Ensure there is a champion by setting a non-zero best score
+        evo.scores[0] = 1;
+        let mut rng = SmallRng::from_entropy();
+        let mut p: PathBuf = std::env::temp_dir();
+        p.push("snake_agent_test.json");
+        let save_path = p.to_string_lossy().to_string();
+        evo.reproduce(&mut rng, &save_path);
+        assert_eq!(evo.pop.len(), evo.pop_size);
+        assert_eq!(evo.games.len(), evo.pop_size);
+        assert_eq!(evo.scores.len(), evo.pop_size);
     }
 }
