@@ -4,9 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-# GPU-backed neural network trainer (burn/wgpu) — scaffold only for now.
-# Enable with: cargo build --features gpu-nn
-gpu-nn = ["dep:burn", "dep:burn-wgpu"]
+# GPU NN UI scaffolding only (safe): does not include heavy deps
+gpu-nn = []
+# Experimental GPU NN backend (burn/wgpu): may require newer toolchain/deps
+gpu-nn-experimental = ["dep:burn", "dep:burn-wgpu"]
 
 [dependencies]
 pixels = "0.13"

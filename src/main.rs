@@ -21,7 +21,7 @@
 //! - Rewards: +apple, -death, small step cost, shaping for distance improvement
 //! - Evolution: elitism, mutation, and staged restarts on stagnation
 
-#[cfg(feature = "gpu-nn")]
+#[cfg(feature = "gpu-nn-experimental")]
 mod gpu_nn;
 
 use ahash::AHashMap;
@@ -955,10 +955,11 @@ fn state_key(game: &Game) -> u32 {
 fn main() -> Result<(), Error> {
     #[cfg(feature = "gpu-nn")]
     {
-        println!("[mode] GPU NN feature enabled (scaffold) — current trainer remains Q-table CPU");
-        // Example: initialize trainer for future use
-        // Inputs/outputs are placeholders; will be aligned with actual state/action space
-        let _maybe_gpu_trainer = gpu_nn::GpuTrainer::new(256, 128, 3);
+        println!("[mode] GPU NN feature enabled (scaffold)");
+    }
+    #[cfg(feature = "gpu-nn-experimental")]
+    {
+        println!("[mode] GPU NN experimental backend enabled");
     }
     let event_loop = EventLoop::new();
     let mut input = WinitInputHelper::new();
@@ -980,7 +981,7 @@ fn main() -> Result<(), Error> {
     let mut evo = EvoTrainer::new(24); // увеличенная популяция для более быстрого поиска решений
     #[cfg(feature = "gpu-nn")]
     let mut nn_mode: bool = false;
-    #[cfg(feature = "gpu-nn")]
+    #[cfg(feature = "gpu-nn-experimental")]
     let mut nn_trainer: Option<gpu_nn::GpuTrainer> = Some(gpu_nn::GpuTrainer::new(256, 128, 3));
 
     // Try to load saved agent and auto-start training if found
