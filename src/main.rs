@@ -76,7 +76,6 @@ enum Dir {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum DeathCause {
     None,
-    Wall,
     SelfCollision,
 }
 
@@ -147,23 +146,26 @@ impl Game {
         self.last_death = DeathCause::None;
 
         let head = self.snake.front().unwrap();
-        let new_head = match self.dir {
-            Dir::Up => Pos::new(head.x, head.y - 1),
-            Dir::Down => Pos::new(head.x, head.y + 1),
-            Dir::Left => Pos::new(head.x - 1, head.y),
-            Dir::Right => Pos::new(head.x + 1, head.y),
-        };
-
-        // Check collision with walls
-        if new_head.x < 0
-            || new_head.x >= GRID_WIDTH as i32
-            || new_head.y < 0
-            || new_head.y >= GRID_HEIGHT as i32
-        {
-            self.last_death = DeathCause::Wall;
-            self.alive = false;
-            return;
+        // Move head with toroidal wrapping across edges
+        let mut new_x = head.x;
+        let mut new_y = head.y;
+        match self.dir {
+            Dir::Up => new_y -= 1,
+            Dir::Down => new_y += 1,
+            Dir::Left => new_x -= 1,
+            Dir::Right => new_x += 1,
         }
+        if new_x < 0 {
+            new_x = GRID_WIDTH as i32 - 1;
+        } else if new_x >= GRID_WIDTH as i32 {
+            new_x = 0;
+        }
+        if new_y < 0 {
+            new_y = GRID_HEIGHT as i32 - 1;
+        } else if new_y >= GRID_HEIGHT as i32 {
+            new_y = 0;
+        }
+        let new_head = Pos::new(new_x, new_y);
 
         // Check collision with self (tail collision disallowed like before)
         if self.snake_set.contains(&new_head) {
@@ -1632,7 +1634,6 @@ fn main() -> Result<(), Error> {
                             let mut reward = if died {
                                 match g.last_death {
                                     DeathCause::SelfCollision => -30.0,
-                                    DeathCause::Wall => -15.0,
                                     DeathCause::None => -12.0,
                                 }
                             } else if ate {
@@ -2110,17 +2111,19 @@ mod tests {
     }
 
     #[test]
-    fn test_wall_death_cause() {
+    fn test_wrap_on_wall() {
         let mut g = Game::new();
-        // Place head at left edge and move left to hit wall
+        // Place head at left edge and move left: should wrap to rightmost column
         g.snake.clear();
         g.snake_set.clear();
         g.snake.push_front(Pos::new(0, 5));
         g.snake_set.insert(Pos::new(0, 5));
         g.dir = Dir::Left;
         g.update();
-        assert!(!g.alive);
-        assert_eq!(g.last_death, DeathCause::Wall);
+        assert!(g.alive);
+        let head = g.snake.front().unwrap();
+        assert_eq!(head.x, GRID_WIDTH as i32 - 1);
+        assert_eq!(head.y, 5);
     }
 
     #[test]
