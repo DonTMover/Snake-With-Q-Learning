@@ -1,10 +1,10 @@
 #![cfg(feature = "gpu-nn")]
 
-use burn::backend::wgpu::{AutoGraphicsApi, Wgpu, WgpuDevice};
 use burn::backend::Autodiff;
+use burn::backend::wgpu::{AutoGraphicsApi, Wgpu, WgpuDevice};
 use burn::module::Module;
 use burn::nn::{Linear, LinearConfig, Relu};
-use burn::tensor::{activation::softmax, Tensor};
+use burn::tensor::{Tensor, activation::softmax};
 
 type B = Autodiff<Wgpu<AutoGraphicsApi, f32, i32>>;
 
@@ -20,7 +20,11 @@ impl PolicyNet {
         let cfg1 = LinearConfig::new(input, hidden);
         let cfg2 = LinearConfig::new(hidden, hidden);
         let cfg3 = LinearConfig::new(hidden, output);
-        Self { fc1: cfg1.init(), fc2: cfg2.init(), fc_out: cfg3.init() }
+        Self {
+            fc1: cfg1.init(),
+            fc2: cfg2.init(),
+            fc_out: cfg3.init(),
+        }
     }
 
     pub fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
