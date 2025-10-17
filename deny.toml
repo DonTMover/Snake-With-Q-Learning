@@ -24,6 +24,10 @@ notice = "warn"
 allow = [
   "MIT", "Apache-2.0", "BSD-3-Clause", "BSD-2-Clause",
   "ISC", "Zlib", "Unicode-DFS-2016", "CC0-1.0",
+  # Needed by gfx/wgpu stack (e.g., naga)
+  "MPL-2.0",
+  # Some crates use this variant
+  "Apache-2.0 WITH LLVM-exception",
 ]
 # Deny GPL family by default; add exceptions in exceptions list if needed
 # You can change to "copyleft" = "deny" for more granularity
