@@ -23,10 +23,14 @@ yanked = "warn"
 allow = [
   "MIT", "Apache-2.0", "BSD-3-Clause", "BSD-2-Clause",
   "ISC", "Zlib", "Unicode-DFS-2016", "CC0-1.0",
+  # Other permissive licenses commonly used in Rust ecosystem
+  "0BSD", "MIT-0", "BSL-1.0",
   # Needed by gfx/wgpu stack (e.g., naga)
   "MPL-2.0",
   # Some crates use this variant
   "Apache-2.0 WITH LLVM-exception",
+  # Sometimes required transitively (e.g., ring)
+  "OpenSSL",
 ]
 
 # You can add crate-specific exceptions with the array field below if needed
