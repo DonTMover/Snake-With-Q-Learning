@@ -1047,12 +1047,7 @@ fn main() -> Result<(), Error> {
                         && best_game_idx < evo.games.len()
                     {
                         let agent_color = evo.pop[best_game_idx].color;
-                        draw_game_transparent(
-                            frame,
-                            &evo.games[best_game_idx],
-                            220,
-                            agent_color,
-                        );
+                        draw_game_transparent(frame, &evo.games[best_game_idx], 220, agent_color);
                     }
                 } else if evo_steps_per_frame < 8_192 {
                     // Low/medium speed: draw grid + agents
@@ -1095,12 +1090,7 @@ fn main() -> Result<(), Error> {
                         && best_game_idx < evo.games.len()
                     {
                         let agent_color = evo.pop[best_game_idx].color;
-                        draw_game_transparent(
-                            frame,
-                            &evo.games[best_game_idx],
-                            220,
-                            agent_color,
-                        );
+                        draw_game_transparent(frame, &evo.games[best_game_idx], 220, agent_color);
                     }
                 } else if evo_steps_per_frame < 20_000 {
                     // High speed: skip grid entirely; draw best only on plain background
@@ -1115,12 +1105,7 @@ fn main() -> Result<(), Error> {
                         && best_game_idx < evo.games.len()
                     {
                         let agent_color = evo.pop[best_game_idx].color;
-                        draw_game_transparent(
-                            frame,
-                            &evo.games[best_game_idx],
-                            220,
-                            agent_color,
-                        );
+                        draw_game_transparent(frame, &evo.games[best_game_idx], 220, agent_color);
                     }
                 } else {
                     // Ultra-high speed: don't render agents at all
@@ -1501,60 +1486,62 @@ fn main() -> Result<(), Error> {
             }
 
             // Mouse clicks on overlay buttons
-            if let Some((mx, my)) = input.mouse() && input.mouse_pressed(0) {
+            if let Some((mx, my)) = input.mouse()
+                && input.mouse_pressed(0)
+            {
                 let mx = mx as u32;
                 let my = my as u32;
 
-                    if panel_visible {
-                        let panel_x: u32 = 8;
-                        let panel_y: u32 = 8;
-                        let panel_w: u32 = 380;
-                        let btn_h: u32 = 32;
-                        let btn_w: u32 = panel_w - 16;
-                        let btn_x: u32 = panel_x + 8;
-                        let chart_y: u32 = panel_y + 310;
-                        let chart_h: u32 = 120;
-                        let btn1_y: u32 = chart_y + chart_h + 8;
-                        let btn2_y: u32 = btn1_y + btn_h + 6;
-                        let btn3_y: u32 = btn2_y + btn_h + 6;
-                        let btn4_y: u32 = btn3_y + btn_h + 6;
-                        let btn5_y: u32 = btn4_y + btn_h + 6;
-                        let btn6_y: u32 = btn5_y + btn_h + 6;
-                        if point_in_rect(mx, my, btn_x, btn1_y, btn_w, btn_h) {
-                            game.paused = !game.paused;
-                        } else if point_in_rect(mx, my, btn_x, btn2_y, btn_w, btn_h) {
-                            if evo.training {
-                                evo_steps_per_frame =
-                                    (evo_steps_per_frame.saturating_mul(2)).min(100_000);
-                            }
-                            // increased max from 10_000
-                            else {
-                                manual_speed_delta_ms = (manual_speed_delta_ms - 10).max(-150);
-                            }
-                        } else if point_in_rect(mx, my, btn_x, btn3_y, btn_w, btn_h) {
-                            game = Game::new();
-                            tick_duration = Duration::from_millis(150);
-                        } else if point_in_rect(mx, my, btn_x, btn4_y, btn_w, btn_h) {
-                            if let Err(e) = evo.save_best(save_path) {
-                                eprintln!("Failed to save agent: {}", e);
-                            } else {
-                                println!("Agent saved to {}", save_path);
-                            }
-                        } else if point_in_rect(mx, my, btn_x, btn5_y, btn_w, btn_h) {
-                            panel_visible = false;
-                        } else if point_in_rect(mx, my, btn_x, btn6_y, btn_w, btn_h) {
-                            show_only_best = !show_only_best;
+                if panel_visible {
+                    let panel_x: u32 = 8;
+                    let panel_y: u32 = 8;
+                    let panel_w: u32 = 380;
+                    let btn_h: u32 = 32;
+                    let btn_w: u32 = panel_w - 16;
+                    let btn_x: u32 = panel_x + 8;
+                    let chart_y: u32 = panel_y + 310;
+                    let chart_h: u32 = 120;
+                    let btn1_y: u32 = chart_y + chart_h + 8;
+                    let btn2_y: u32 = btn1_y + btn_h + 6;
+                    let btn3_y: u32 = btn2_y + btn_h + 6;
+                    let btn4_y: u32 = btn3_y + btn_h + 6;
+                    let btn5_y: u32 = btn4_y + btn_h + 6;
+                    let btn6_y: u32 = btn5_y + btn_h + 6;
+                    if point_in_rect(mx, my, btn_x, btn1_y, btn_w, btn_h) {
+                        game.paused = !game.paused;
+                    } else if point_in_rect(mx, my, btn_x, btn2_y, btn_w, btn_h) {
+                        if evo.training {
+                            evo_steps_per_frame =
+                                (evo_steps_per_frame.saturating_mul(2)).min(100_000);
                         }
-                    } else {
-                        // Check if clicked on show button
-                        let show_btn_x: u32 = 8;
-                        let show_btn_y: u32 = 8;
-                        let show_btn_w: u32 = 100;
-                        let show_btn_h: u32 = 32;
-                        if point_in_rect(mx, my, show_btn_x, show_btn_y, show_btn_w, show_btn_h) {
-                            panel_visible = true;
+                        // increased max from 10_000
+                        else {
+                            manual_speed_delta_ms = (manual_speed_delta_ms - 10).max(-150);
                         }
+                    } else if point_in_rect(mx, my, btn_x, btn3_y, btn_w, btn_h) {
+                        game = Game::new();
+                        tick_duration = Duration::from_millis(150);
+                    } else if point_in_rect(mx, my, btn_x, btn4_y, btn_w, btn_h) {
+                        if let Err(e) = evo.save_best(save_path) {
+                            eprintln!("Failed to save agent: {}", e);
+                        } else {
+                            println!("Agent saved to {}", save_path);
+                        }
+                    } else if point_in_rect(mx, my, btn_x, btn5_y, btn_w, btn_h) {
+                        panel_visible = false;
+                    } else if point_in_rect(mx, my, btn_x, btn6_y, btn_w, btn_h) {
+                        show_only_best = !show_only_best;
                     }
+                } else {
+                    // Check if clicked on show button
+                    let show_btn_x: u32 = 8;
+                    let show_btn_y: u32 = 8;
+                    let show_btn_w: u32 = 100;
+                    let show_btn_h: u32 = 32;
+                    if point_in_rect(mx, my, show_btn_x, show_btn_y, show_btn_w, show_btn_h) {
+                        panel_visible = true;
+                    }
+                }
             }
 
             // Evolutionary training loop (population of agents - parallelized with rayon)
