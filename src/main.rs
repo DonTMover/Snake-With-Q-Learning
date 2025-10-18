@@ -49,6 +49,8 @@ mod gpu_render;
 
 #[cfg(feature = "dqn-gpu")]
 mod dqn;
+#[cfg(all(feature = "dqn-gpu", feature = "dqn-gpu-cuda"))]
+use candle_core::Device as _; // bring Device type to allow Device::new_cuda (name not used)
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 600;
 const GRID_SIZE: u32 = 20;
@@ -1018,6 +1020,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("🚀 Auto-starting evolution with loaded agent");
     }
 
+    // If CUDA is available, auto-enable DQN and start evolution
+    #[cfg(all(feature = "dqn-gpu", feature = "dqn-gpu-cuda"))]
+    {
+        if let Ok(cuda_dev) = candle_core::Device::new_cuda(0) {
+            // Initialize DQN agent on CUDA
+            match dqn::DqnAgent::new(1024, 256, &cuda_dev) {
+                Ok(agent) => {
+                    #[cfg(feature = "dqn-gpu")]
+                    {
+                        dqn_mode = true;
+                        dqn_agent = Some(agent);
+                        println!("[DQN] auto-enabled (device: Cuda(0))");
+                        if !evo.training {
+                            evo.training = true;
+                            println!("[hint] CUDA detected: auto-starting Evolution with DQN");
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[DQN] auto-enable failed: {}", e);
+                }
+            }
+        }
+    }
+
     let mut rng: SmallRng = SmallRng::from_entropy();
     let mut last_update = Instant::now();
     let mut tick_duration = Duration::from_millis(150);
@@ -1579,6 +1606,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     1500
                 };
+                    println!(
+                        "[hint] G toggles step budget only (not GPU learning). Use J to toggle DQN, and E to start training."
+                    );
             }
             if input.key_pressed(VirtualKeyCode::B) {
                 show_only_best = !show_only_best;
@@ -1590,10 +1620,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     dqn_mode = !dqn_mode;
                     if dqn_mode {
                         let dev = dqn::preferred_device();
-                        match dqn::DqnAgent::new(1024, 256, dev) {
+                        let dev_print = format!("{:?}", dev);
+                        match dqn::DqnAgent::new(1024, 256, &dev) {
                             Ok(agent) => {
                                 dqn_agent = Some(agent);
-                                println!("[DQN] enabled (device: {:?})", dev);
+                                println!("[DQN] enabled (device: {})", dev_print);
+                                if !evo.training {
+                                    println!(
+                                        "[hint] DQN is active only during Evolution. Press E to start training."
+                                    );
+                                }
                             }
                             Err(e) => {
                                 dqn_mode = false;

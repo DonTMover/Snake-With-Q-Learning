@@ -25,7 +25,7 @@ set CUDACXX=%CUDA_PATH%\bin\nvcc.exe
 
 echo Using CUDA at %CUDA_PATH%
 set RUST_BACKTRACE=1
-echo Building (logs -> build_cuda.log)...
+echo "Building ( logs -> build_cuda.log )..."
 cargo build -vv --release --features "dqn-gpu dqn-gpu-cuda" > build_cuda.log 2>&1
 set BUILD_ERR=%ERRORLEVEL%
 if not %BUILD_ERR%==0 (
