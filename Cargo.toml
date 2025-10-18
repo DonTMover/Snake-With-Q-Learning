@@ -15,6 +15,8 @@ dqn-gpu = ["dep:candle-core", "dep:candle-nn"]
 dqn-gpu-cuda = ["candle-core/cuda"]
 # Render via wgpu directly, bypassing pixels
 gpu-render = []
+## NPU inference via ONNX Runtime + DirectML (Windows only)
+npu-directml = ["dep:ort", "dep:ndarray"]
 
 [dependencies]
 pixels = "0.13"
@@ -30,6 +32,7 @@ wgpu = "0.16"
 pollster = "0.3"
 bytemuck = { version = "1.14", features = ["derive"] }
 anyhow = "1.0"
+ndarray = { version = "0.16", optional = true, features = ["std"] }
 
 # Optional: GPU NN backend (disabled by default)
 burn = { version = "0.14", optional = true, default-features = false }
@@ -38,4 +41,7 @@ burn-wgpu = { version = "0.14", optional = true, default-features = false }
 # Candle (Rust DL) optional deps for DQN
 candle-core = { version = "0.8", optional = true, default-features = false }
 candle-nn = { version = "0.8", optional = true, default-features = false }
+
+# ONNX Runtime for NPU/DirectML inference (download prebuilt binaries)
+ort = { version = "2.0.0-rc.10", optional = true, default-features = false, features = ["download-binaries", "directml", "ndarray"] }
 

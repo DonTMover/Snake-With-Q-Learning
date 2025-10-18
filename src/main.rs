@@ -49,6 +49,8 @@ mod gpu_render;
 
 #[cfg(feature = "dqn-gpu")]
 mod dqn;
+#[cfg(all(target_os = "windows", feature = "npu-directml"))]
+mod npu;
 #[cfg(all(feature = "dqn-gpu", feature = "dqn-gpu-cuda"))]
 use candle_core::Device as _; // bring Device type to allow Device::new_cuda (name not used)
 const WIDTH: u32 = 800;
@@ -1025,6 +1027,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut dqn_mode: bool = false; // toggle DQN training
     #[cfg(feature = "dqn-gpu")]
     let mut dqn_agent: Option<dqn::DqnAgent> = None;
+    #[cfg(all(target_os = "windows", feature = "npu-directml"))]
+    let mut npu_mode: bool = false; // toggle NPU inference
+    #[cfg(all(target_os = "windows", feature = "npu-directml"))]
+    let mut npu_policy: Option<npu::NpuPolicy> = None;
     #[cfg(all(feature = "gpu-nn-experimental", feature = "gpu-nn"))]
     let mut nn_trainer: Option<gpu_nn::GpuTrainer> = Some(gpu_nn::GpuTrainer::new(256, 128, 3));
 
@@ -1623,6 +1629,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ultra_fast = !ultra_fast;
                 max_steps_per_tick = if ultra_fast { 50_000 } else { 1500 };
             }
+            // Toggle NPU inference (DirectML/ONNX) - Windows only
+            #[cfg(all(target_os = "windows", feature = "npu-directml"))]
+            {
+                if input.key_pressed(VirtualKeyCode::K) {
+                    npu_mode = !npu_mode;
+                    if npu_mode {
+                        match npu::NpuPolicy::load("snake_dqn.onnx", 1024, 3) {
+                            Ok(p) => {
+                                npu_policy = Some(p);
+                                println!("[NPU] DirectML policy loaded (ONNX): snake_dqn.onnx");
+                                if !evo.training {
+                                    println!("[hint] NPU policy is used during Evolution (E). Press E to start training.");
+                                }
+                            }
+                            Err(e) => {
+                                npu_mode = false;
+                                eprintln!("[NPU] failed to load ONNX model: {}", e);
+                            }
+                        }
+                    } else {
+                        npu_policy = None;
+                        println!("[NPU] disabled");
+                    }
+                }
+            }
             // Toggle GPU acceleration mode (just adjusts training budget for now)
             if input.key_pressed(VirtualKeyCode::G) && gpu_available {
                 gpu_enabled = !gpu_enabled;
@@ -1795,6 +1826,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     #[cfg(not(all(feature = "gpu-nn-experimental", feature = "gpu-nn")))]
                     let nn_active = false;
 
+                    // Route action selection through one of: GPU NN, NPU (DirectML), DQN, or CPU Q-learning
+                    let mut handled_path = false;
                     if nn_active {
                         // Batched GPU policy inference for alive agents
                         #[cfg(all(feature = "gpu-nn-experimental", feature = "gpu-nn"))]
@@ -1860,56 +1893,86 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 all_done = false;
                             }
                         }
-                    } else {
-                        // If DQN mode is enabled, use a single shared DQN for action selection & learning
-                        #[cfg(feature = "dqn-gpu")]
-                        if dqn_mode {
-                            if let Some(agent) = dqn_agent.as_mut() {
-                                // Iterate sequentially to accumulate transitions
-                                for i in 0..len {
-                                    let g = &mut evo.games[i];
-                                    if !g.alive || evo.scores[i] >= target_score { continue; }
-                                    let s = state_key(g) % agent.input_vocab as u32;
-                                    // Greedy action from DQN
-                                    let a_idx = agent.select_action(s).unwrap_or(1);
-                                    g.change_dir(dir_after_action(g.dir, a_idx));
-                                    let before_score = g.score;
-                                    let was_alive = g.alive;
-                                    let head0 = *g.snake.front().unwrap();
-                                    let d0 = (g.apple.x - head0.x).abs() + (g.apple.y - head0.y).abs();
-                                    g.update();
-                                    let ate = g.score > before_score;
-                                    let died = was_alive && !g.alive;
-                                    let head1 = *g.snake.front().unwrap();
-                                    let d1 = (g.apple.x - head1.x).abs() + (g.apple.y - head1.y).abs();
-                                    let length1 = g.snake.len();
-                                    // Reward shaping identical to tabular path
-                                    let mut reward = if died {
-                                        match g.last_death {
-                                            DeathCause::SelfCollision => -30.0,
-                                            DeathCause::Wall => -20.0,
-                                            DeathCause::None => -12.0,
-                                        }
-                                    } else if ate {
-                                        10.0 + (length1 as f32 * 0.1)
-                                    } else { -0.005 };
-                                    if !died && !ate {
-                                        if d1 < d0 { reward += 0.05; } else if d1 > d0 { reward -= 0.03; }
-                                        if d1 <= 3 && !ate { reward += 0.02; }
-                                    }
-                                    let ns = state_key(g) % agent.input_vocab as u32;
-                                    agent.push_transition(s, a_idx, reward, ns, died || !g.alive);
-                                    if g.alive { evo.scores[i] = g.score; }
-                                }
-                                // Train a few steps per iteration
-                                let _ = agent.train_step(256);
+                        handled_path = true;
+                    }
+
+                    // NPU DirectML path (inference-only)
+                    #[cfg(all(target_os = "windows", feature = "npu-directml"))]
+                    if !handled_path && npu_mode {
+                        if let Some(policy) = npu_policy.as_ref() {
+                            for i in 0..len {
+                                let g = &mut evo.games[i];
+                                if !g.alive || evo.scores[i] >= target_score { continue; }
+                                let s = state_key(g) % 1024;
+                                let a_idx = policy.select_action(s).unwrap_or(1);
+                                g.change_dir(dir_after_action(g.dir, a_idx));
+                                let before_score = g.score;
+                                let was_alive = g.alive;
+                                let head0 = *g.snake.front().unwrap();
+                                let d0 = (g.apple.x - head0.x).abs() + (g.apple.y - head0.y).abs();
+                                g.update();
+                                let ate = g.score > before_score;
+                                let died = was_alive && !g.alive;
+                                let head1 = *g.snake.front().unwrap();
+                                let d1 = (g.apple.x - head1.x).abs() + (g.apple.y - head1.y).abs();
+                                let length1 = g.snake.len();
+                                if g.alive { evo.scores[i] = g.score; }
                             }
-                            // all_done check
                             if evo.scores.iter().zip(evo.games.iter()).any(|(s, g)| g.alive && *s < target_score) {
                                 all_done = false;
                             }
-                        } else {
-                        // CPU tabular Q-learning path (parallel)
+                        }
+                        handled_path = true;
+                    }
+
+                    // DQN path (Candle)
+                    #[cfg(feature = "dqn-gpu")]
+                    if !handled_path && dqn_mode {
+                        if let Some(agent) = dqn_agent.as_mut() {
+                            // Iterate sequentially to accumulate transitions
+                            for i in 0..len {
+                                let g = &mut evo.games[i];
+                                if !g.alive || evo.scores[i] >= target_score { continue; }
+                                let s = state_key(g) % agent.input_vocab as u32;
+                                let a_idx = agent.select_action(s).unwrap_or(1);
+                                g.change_dir(dir_after_action(g.dir, a_idx));
+                                let before_score = g.score;
+                                let was_alive = g.alive;
+                                let head0 = *g.snake.front().unwrap();
+                                let d0 = (g.apple.x - head0.x).abs() + (g.apple.y - head0.y).abs();
+                                g.update();
+                                let ate = g.score > before_score;
+                                let died = was_alive && !g.alive;
+                                let head1 = *g.snake.front().unwrap();
+                                let d1 = (g.apple.x - head1.x).abs() + (g.apple.y - head1.y).abs();
+                                let length1 = g.snake.len();
+                                let mut reward = if died {
+                                    match g.last_death {
+                                        DeathCause::SelfCollision => -30.0,
+                                        DeathCause::Wall => -20.0,
+                                        DeathCause::None => -12.0,
+                                    }
+                                } else if ate {
+                                    10.0 + (length1 as f32 * 0.1)
+                                } else { -0.005 };
+                                if !died && !ate {
+                                    if d1 < d0 { reward += 0.05; } else if d1 > d0 { reward -= 0.03; }
+                                    if d1 <= 3 && !ate { reward += 0.02; }
+                                }
+                                let ns = state_key(g) % agent.input_vocab as u32;
+                                agent.push_transition(s, a_idx, reward, ns, died || !g.alive);
+                                if g.alive { evo.scores[i] = g.score; }
+                            }
+                            let _ = agent.train_step(256);
+                        }
+                        if evo.scores.iter().zip(evo.games.iter()).any(|(s, g)| g.alive && *s < target_score) {
+                            all_done = false;
+                        }
+                        handled_path = true;
+                    }
+
+                    // CPU tabular Q-learning path (default)
+                    if !handled_path {
                         let (pop_slice, _) = evo.pop.split_at_mut(len);
                         let (games_slice, _) = evo.games.split_at_mut(len);
                         let (scores_slice, _) = evo.scores.split_at_mut(len);
@@ -1923,7 +1986,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if !g.alive || *score_ref >= target_score {
                                     return;
                                 }
-                                // local RNG per thread (SmallRng)
                                 let mut local_rng = SmallRng::from_entropy();
                                 let s = state_key(g);
                                 let a_idx = agent.select_action(s, &mut local_rng);
@@ -1939,7 +2001,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let d1 = (g.apple.x - head1.x).abs() + (g.apple.y - head1.y).abs();
                                 let length1 = g.snake.len();
 
-                                // Death penalties: self-collision is the heaviest crime
                                 let mut reward = if died {
                                     match g.last_death {
                                         DeathCause::SelfCollision => -30.0,
@@ -1952,14 +2013,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     -0.005
                                 };
                                 if !died && !ate {
-                                    if d1 < d0 {
-                                        reward += 0.05;
-                                    } else if d1 > d0 {
-                                        reward -= 0.03;
-                                    }
-                                    if d1 <= 3 && !ate {
-                                        reward += 0.02;
-                                    }
+                                    if d1 < d0 { reward += 0.05; } else if d1 > d0 { reward -= 0.03; }
+                                    if d1 <= 3 && !ate { reward += 0.02; }
                                 }
 
                                 let ns = state_key(g);
@@ -1967,27 +2022,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 agent.steps += 1;
                                 if died {
                                     agent.episodes += 1;
-                                    agent.epsilon =
-                                        (agent.epsilon * agent.decay).max(agent.min_epsilon);
+                                    agent.epsilon = (agent.epsilon * agent.decay).max(agent.min_epsilon);
                                 }
-                                if g.alive {
-                                    *score_ref = g.score;
-                                }
-                                if g.score >= target_score {
-                                    solved_flag.store(true, Ordering::Relaxed);
-                                }
+                                if g.alive { *score_ref = g.score; }
+                                if g.score >= target_score { solved_flag.store(true, Ordering::Relaxed); }
                             });
 
                         if solved_flag.load(Ordering::Relaxed) {
                             evo.solved = true;
                             evo.training = false;
-                        } else if scores_slice
-                            .iter()
-                            .zip(games_slice.iter())
-                            .any(|(s, g)| g.alive && *s < target_score)
-                        {
+                        } else if scores_slice.iter().zip(games_slice.iter()).any(|(s, g)| g.alive && *s < target_score) {
                             all_done = false;
-                        }
                         }
                     }
 
