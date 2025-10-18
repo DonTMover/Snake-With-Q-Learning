@@ -2,8 +2,8 @@
 //!
 //! This binary renders the classic Snake game using `pixels`/`winit` and includes
 //! an on-screen control panel. When Evolution (E) is enabled, a population of
-//! Q-learning agents is trained in parallel. The best agent (champion) is saved
-//! to `snake_agent.json` and auto-loaded on the next run.
+//! Q-learning agents is trained in parallel. JSON auto-save/load of a champion
+//! is disabled; for DQN use `.safetensors` checkpoints instead.
 //!
 //! Key controls:
 //! - Arrows/WASD: move
@@ -512,41 +512,7 @@ impl EvoTrainer {
         }
     }
 
-    /// Save the current champion (or best of population) to JSON.
-    fn save_best(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
-        // Save the champion if we have one, otherwise save current best
-        let agent_to_save = if let Some(ref champ) = self.champion {
-            champ
-        } else if !self.pop.is_empty() {
-            let mut idxs: Vec<usize> = (0..self.pop_size).collect();
-            idxs.sort_by_key(|&i| std::cmp::Reverse(self.scores[i]));
-            &self.pop[*idxs.first().unwrap_or(&0)]
-        } else {
-            return Ok(());
-        };
-        let json = serde_json::to_string_pretty(agent_to_save)?;
-        fs::write(path, json)?;
-        Ok(())
-    }
-
-    /// Load a champion agent from JSON and seed the population from it.
-    fn load_best(&mut self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
-        if !Path::new(path).exists() {
-            return Ok(());
-        }
-        let json = fs::read_to_string(path)?;
-        let agent: QAgent = serde_json::from_str(&json)?;
-
-        // Генерируем яркие цвета для загруженных агентов
-        let colors = generate_population_colors(self.pop_size);
-
-        // Replace all agents with the loaded one + assign colors
-        for (p, &color) in self.pop.iter_mut().zip(colors.iter()).take(self.pop_size) {
-            *p = agent.clone();
-            p.color = color; // устанавливаем уникальный цвет
-        }
-        Ok(())
-    }
+    // JSON save/load methods removed intentionally.
 
     /// Reset per-epoch counters and restart all games.
     fn reset_epoch(&mut self) {
@@ -1071,7 +1037,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Ok(cuda_dev) = candle_core::Device::new_cuda(0) {
             // Initialize DQN agent on CUDA
             match dqn::DqnAgent::new(1024, 256, &cuda_dev) {
-                Ok(agent) => {
+                Ok(mut agent) => {
+                    // Try to load previous weights
+                    let wt = Path::new("dqn_agent.safetensors");
+                    if wt.exists() {
+                        match agent.load_safetensors("dqn_agent.safetensors") {
+                            Ok(_) => println!("[DQN] loaded weights from dqn_agent.safetensors"),
+                            Err(e) => eprintln!("[DQN] failed to load weights: {}", e),
+                        }
+                    }
                     #[cfg(feature = "dqn-gpu")]
                     {
                         dqn_mode = true;
@@ -1707,7 +1681,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let dev = dqn::preferred_device();
                         let dev_print = format!("{:?}", dev);
                         match dqn::DqnAgent::new(1024, 256, &dev) {
-                            Ok(agent) => {
+                            Ok(mut agent) => {
+                                // Try to load previous weights if present
+                                let wt = Path::new("dqn_agent.safetensors");
+                                if wt.exists() {
+                                    match agent.load_safetensors("dqn_agent.safetensors") {
+                                        Ok(_) => println!("[DQN] loaded weights from dqn_agent.safetensors"),
+                                        Err(e) => eprintln!("[DQN] failed to load weights: {}", e),
+                                    }
+                                }
                                 dqn_agent = Some(agent);
                                 println!("[DQN] enabled (device: {})", dev_print);
                                 evo.set_wrap_world(false);
@@ -1818,10 +1800,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         game = Game::new();
                         tick_duration = Duration::from_millis(150);
                     } else if point_in_rect(mx, my, btn_x, btn4_y, btn_w, btn_h) {
-                        if let Err(e) = evo.save_best(save_path) {
-                            eprintln!("Failed to save agent: {}", e);
-                        } else {
-                            println!("Agent saved to {}", save_path);
+                        // JSON save disabled; if DQN active, save its weights instead
+                        #[cfg(feature = "dqn-gpu")]
+                        if let (true, Some(agent)) = (dqn_mode, dqn_agent.as_ref()) {
+                            if let Err(e) = agent.save_safetensors("dqn_agent.safetensors") {
+                                eprintln!("[DQN] save failed: {}", e);
+                            } else {
+                                println!("[DQN] weights saved to dqn_agent.safetensors");
+                            }
                         }
                     } else if point_in_rect(mx, my, btn_x, btn5_y, btn_w, btn_h) {
                         panel_visible = false;
@@ -2093,6 +2079,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ran_steps += 1;
                     if all_done || (evo.steps_taken >= evo.step_limit && !leader_protected) {
                         // All individuals finished or step limit reached - start new epoch
+                        // If DQN is active, checkpoint weights automatically
+                        #[cfg(feature = "dqn-gpu")]
+                        if let (true, Some(agent)) = (dqn_mode, dqn_agent.as_ref()) {
+                            if let Err(e) = agent.save_safetensors("dqn_agent.safetensors") {
+                                eprintln!("[DQN] autosave failed: {}", e);
+                            } else {
+                                println!("[DQN] autosaved weights to dqn_agent.safetensors");
+                            }
+                        }
                         evo.reproduce(&mut rng);
                         evo_pending_steps = 0; // reset pending work on epoch change
                         break;

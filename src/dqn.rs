@@ -83,7 +83,7 @@ pub struct DqnAgent {
 
 impl DqnAgent {
     pub fn new(input_vocab: usize, hidden: usize, device: &Device) -> candle::Result<Self> {
-        let mut varmap = nn::VarMap::new();
+    let varmap = nn::VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, candle::DType::F32, device);
         let net = DqnNet::new(vb, device, input_vocab, hidden)?;
         // Optimizer over all variables in the model
@@ -156,8 +156,14 @@ impl DqnAgent {
 
     /// Save current model weights to a .safetensors file
     pub fn save_safetensors(&self, path: &str) -> candle::Result<()> {
-        // VarMap owns all learnable parameters; persist them as safetensors.
-        self.varmap.save_safetensors(path)?;
+        // Save variables; format inferred from extension (e.g., .safetensors)
+        self.varmap.save(path)?;
+        Ok(())
+    }
+
+    /// Load model weights from a .safetensors file
+    pub fn load_safetensors(&mut self, path: &str) -> candle::Result<()> {
+        self.varmap.load(path)?;
         Ok(())
     }
 }
