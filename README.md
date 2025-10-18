@@ -6,12 +6,13 @@ An interactive Snake game with an optional evolutionary Q-learning trainer. The 
 
 ## Features
 
-- Classic Snake gameplay on a fixed grid (800x600 window, 20px cells).
+- Classic Snake on a fixed grid (800x600 window, 20px cells) with wrap-around edges.
 - Smooth pixel rendering with a checkerboard grid background and snake head “eyes”.
 - On-screen control panel with current score, length, speed, evolution status, epoch charts, and quick action buttons.
 - Q-learning agent with compact, vision-based state encoding (20-bit key) and three actions: turn left, go straight, turn right.
-- Evolutionary trainer (default population 24) running multiple agents in parallel, with elitism, mutation, and adaptive restarts on stagnation.
+- Evolutionary trainer (default population 24) running multiple agents in parallel, with elitism, mutation, and adaptive restarts on stagnation. Unique leader protection prevents premature epoch resets.
 - Auto-save and auto-load of the best (champion) agent to/from `snake_agent.json`.
+- GPU-aware training budget: if a GPU adapter is available, a higher steps-per-tick budget is used; toggle via keyboard.
 
 ## Controls
 
@@ -24,6 +25,10 @@ An interactive Snake game with an optional evolutionary Q-learning trainer. The 
   - Evolution: `+` doubles and `-` halves steps/frame (up to 100,000)
 - Save best agent: S
 - Toggle panel visibility: H
+- Toggle acceleration budget (CPU/GPU): G (only shown if a GPU is available)
+- Ultra-fast training (skip rendering, raise budget): U
+- Show only best agent during training: B
+- If built with feature `gpu-nn`: toggle experimental NN mode with N
 - Quit: Esc or close window
 - Mouse: Click panel buttons (Pause/Resume, Speed+, Restart, Save, Hide/Show)
 
@@ -69,10 +74,10 @@ Three discrete actions relative to the current direction:
 - 2 = turn right
 
 ### Rewards
-- +10.0 for eating an apple, slightly increasing with length
-- -10.0 for dying
+- +10.0 for eating an apple, increasing slightly with length (+0.1 per current length)
+- Death penalty depends on cause: -30.0 for self-collision; -12.0 otherwise
 - Small step penalty (-0.005)
-- Shaping: small bonus when moving closer to the apple; small penalty when moving away
+- Shaping: +0.05 when moving closer and -0.03 when moving away; additional +0.02 when within 3 cells of the apple
 
 ### QAgent parameters
 - epsilon-greedy with decay (`epsilon`, `min_epsilon`, `decay`)
@@ -80,16 +85,17 @@ Three discrete actions relative to the current direction:
 - `steps` and `episodes` counters recorded per agent
 
 ### Evolutionary trainer
-- Population of agents (default 10), each playing in its own game instance in parallel
-- At epoch end, reproduction with elitism + mutations; several restart strategies on long stagnation
+- Population of agents (default 24), each playing in its own game instance in parallel
+- Per-epoch step limit with a “leader protection” exception that lets a unique best agent continue beyond the limit
+- At epoch end, reproduction with elitism + mutations; multiple staged restart strategies on long stagnation, seeding from the global champion
 - Tracks a global champion (best ever), with auto-save on improvement
 - Agents are color-coded for visualization
 
 ## Code structure
 
 - `src/main.rs` — the main application with game logic, rendering, Q-learning agent, and evolutionary trainer.
+- `src/gpu_nn.rs` — optional experimental NN scaffolding (behind the `gpu-nn` feature).
 - `snake_agent.json` — saved champion agent (created at runtime when saving).
-- Files `src/game.rs`, `src/draw.rs`, `src/pos.rs` are an older/alternate TUI prototype and are not used by the current binary build.
 
 ## Tips
 
@@ -99,4 +105,4 @@ Three discrete actions relative to the current direction:
 
 ## License
 
-No license specified. Add one if you plan to distribute.
+MIT License — see LICENSE file.

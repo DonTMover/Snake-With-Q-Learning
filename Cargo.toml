@@ -2,6 +2,7 @@
 name = "Snake-With-Q-Learning"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
 [features]
 # GPU NN UI scaffolding only (safe): does not include heavy deps
