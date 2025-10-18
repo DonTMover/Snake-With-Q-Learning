@@ -13,6 +13,8 @@ gpu-nn-experimental = ["dep:burn", "dep:burn-wgpu"]
 dqn-gpu = ["dep:candle-core", "dep:candle-nn"]
 # Enable CUDA backend for Candle (requires NVIDIA CUDA Toolkit & NVCC)
 dqn-gpu-cuda = ["candle-core/cuda"]
+# Render via wgpu directly, bypassing pixels
+gpu-render = []
 
 [dependencies]
 pixels = "0.13"
@@ -26,6 +28,8 @@ ahash = { version = "0.8", features = ["serde"] }
 rayon = "1.10"
 wgpu = "0.16"
 pollster = "0.3"
+bytemuck = { version = "1.14", features = ["derive"] }
+anyhow = "1.0"
 
 # Optional: GPU NN backend (disabled by default)
 burn = { version = "0.14", optional = true, default-features = false }

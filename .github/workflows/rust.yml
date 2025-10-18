@@ -34,8 +34,10 @@ jobs:
         run: cargo fmt --all -- --check
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
-      - name: cargo build
+      - name: cargo build (default)
         run: cargo build --verbose
+      - name: cargo build (dqn-gpu CPU)
+        run: cargo build --no-default-features --features "dqn-gpu" --verbose
       - name: cargo test
         run: cargo test --all-targets --verbose
 
@@ -56,13 +58,15 @@ jobs:
           override: true
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-      - name: cargo build
+      - name: cargo build (default)
         run: cargo build --verbose
+      - name: cargo build (dqn-gpu CPU)
+        run: cargo build --no-default-features --features "dqn-gpu" --verbose
       - name: cargo test
         run: cargo test --all-targets --verbose
 
   windows-release:
-    name: Windows Build/Release
+    name: Windows Build/Release (default + dqn)
     runs-on: windows-latest
     needs: [test]
     steps:
@@ -77,13 +81,31 @@ jobs:
           override: true
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-      - name: Build release
+      - name: Build release (default)
         run: cargo build --release
+      - name: Preserve default exe name
+        shell: pwsh
+        run: |
+          $srcExe = "target/release/Snake-With-Q-Learning.exe"
+          $srcPdb = "target/release/Snake-With-Q-Learning.pdb"
+          if (Test-Path $srcExe) { Copy-Item $srcExe "target/release/snake-default.exe" -Force }
+          if (Test-Path $srcPdb) { Copy-Item $srcPdb "target/release/snake-default.pdb" -Force }
+      - name: Build release (dqn-gpu CPU)
+        run: cargo build --release --no-default-features --features "dqn-gpu"
+      - name: Preserve DQN exe name
+        shell: pwsh
+        run: |
+          $srcExe = "target/release/Snake-With-Q-Learning.exe"
+          $srcPdb = "target/release/Snake-With-Q-Learning.pdb"
+          if (Test-Path $srcExe) { Copy-Item $srcExe "target/release/snake-dqn.exe" -Force }
+          if (Test-Path $srcPdb) { Copy-Item $srcPdb "target/release/snake-dqn.pdb" -Force }
       - name: Create GitHub Release (tagged)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: target/release/*.exe
+          files: |
+            target/release/snake-*.exe
+            target/release/snake-*.pdb
           tag_name: ${{ github.ref_name }}
           name: Snake-With-Q-Learning ${{ github.ref_name }}
           draft: false
@@ -92,7 +114,9 @@ jobs:
         if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          files: target/release/*.exe
+          files: |
+            target/release/snake-*.exe
+            target/release/snake-*.pdb
           tag_name: latest
           target_commitish: ${{ github.sha }}
           name: Snake-With-Q-Learning latest
@@ -103,7 +127,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Snake-With-Q-Learning-windows-x86_64
-          path: target/release/*.exe
+          path: |
+            target/release/snake-*.exe
+            target/release/snake-*.pdb
 
   cut-release:
     name: Cut Release (bump version and tag)

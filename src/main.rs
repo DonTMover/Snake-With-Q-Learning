@@ -25,7 +25,8 @@
 mod gpu_nn;
 
 use ahash::AHashMap;
-use pixels::{Error, Pixels, SurfaceTexture};
+#[cfg(not(feature = "gpu-render"))]
+use pixels::{Pixels, SurfaceTexture};
 use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
@@ -42,6 +43,9 @@ use winit::event::{Event, VirtualKeyCode};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::WindowBuilder;
 use winit_input_helper::WinitInputHelper;
+
+#[cfg(feature = "gpu-render")]
+mod gpu_render;
 
 #[cfg(feature = "dqn-gpu")]
 mod dqn;
@@ -203,6 +207,7 @@ impl Game {
     }
 
     /// Draw the current game state to the frame buffer (RGBA8).
+    #[cfg(not(feature = "gpu-render"))]
     fn draw(&self, frame: &mut [u8]) {
         // Clear screen with dark background
         clear_rgba(frame, 30, 30, 40, 255);
@@ -275,6 +280,7 @@ impl Game {
     }
 
     /// Fill a single cell-sized rectangle at the given grid position with an RGB color.
+    #[cfg(not(feature = "gpu-render"))]
     fn draw_rect(&self, frame: &mut [u8], grid_x: u32, grid_y: u32, r: u8, g: u8, b: u8) {
         let x = grid_x * GRID_SIZE;
         let y = grid_y * GRID_SIZE;
@@ -295,6 +301,7 @@ impl Game {
     }
 
     /// Draw simple black "eyes" on the snake head based on current direction.
+    #[cfg(not(feature = "gpu-render"))]
     fn draw_eyes(&self, frame: &mut [u8], pos: &Pos) {
         let base_x = pos.x as u32 * GRID_SIZE;
         let base_y = pos.y as u32 * GRID_SIZE;
@@ -956,7 +963,7 @@ fn state_key(game: &Game) -> u32 {
 
 /// Entry point: sets up the window, renderer, input loop, and optionally runs
 /// evolutionary training.
-fn main() -> Result<(), Error> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "gpu-nn")]
     {
         println!("[mode] GPU NN feature enabled (scaffold)");
@@ -975,11 +982,14 @@ fn main() -> Result<(), Error> {
         .build(&event_loop)
         .unwrap();
 
+    #[cfg(not(feature = "gpu-render"))]
     let mut pixels = {
         let window_size = window.inner_size();
         let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &window);
         Pixels::new(WIDTH, HEIGHT, surface_texture)?
     };
+    #[cfg(feature = "gpu-render")]
+    let mut gpu = pollster::block_on(gpu_render::GpuRenderer::new(&window, WIDTH, HEIGHT))?;
 
     let mut game = Game::new();
     let mut evo = EvoTrainer::new(24); // увеличенная популяция для более быстрого поиска решений
@@ -1049,9 +1059,11 @@ fn main() -> Result<(), Error> {
         *control_flow = ControlFlow::Poll;
 
         if let Event::RedrawRequested(_) = event {
+            #[cfg(not(feature = "gpu-render"))]
             let frame = pixels.frame_mut();
 
-            // Draw the appropriate game(s)
+            // Draw the appropriate game(s) [CPU framebuffer path]
+            #[cfg(not(feature = "gpu-render"))]
             if evo.training {
                 // Rendering strategy tuned for performance at high EVO speeds
                 if ultra_fast {
@@ -1135,10 +1147,12 @@ fn main() -> Result<(), Error> {
                     clear_rgba(frame, 10, 10, 15, 255);
                 }
             } else {
+                #[cfg(not(feature = "gpu-render"))]
                 game.draw(frame);
             }
 
             // Controls overlay (semi-transparent) - only draw if visible
+            #[cfg(not(feature = "gpu-render"))]
             if panel_visible {
                 let panel_x: u32 = 8;
                 let panel_y: u32 = 8;
@@ -1373,13 +1387,13 @@ fn main() -> Result<(), Error> {
                 draw_button(frame, btn_x, btn6_y, btn_w, btn_h, best_label);
             } else {
                 // Draw small button to show panel again
+                #[cfg(not(feature = "gpu-render"))]
                 let show_btn_x: u32 = 8;
                 let show_btn_y: u32 = 8;
                 let show_btn_w: u32 = 100;
                 let show_btn_h: u32 = 32;
-                draw_button(
-                    frame, show_btn_x, show_btn_y, show_btn_w, show_btn_h, "SHOW H",
-                );
+                #[cfg(not(feature = "gpu-render"))]
+                draw_button(frame, show_btn_x, show_btn_y, show_btn_w, show_btn_h, "SHOW H");
             }
 
             // Update and draw FPS counter (top-right, green)
@@ -1390,27 +1404,105 @@ fn main() -> Result<(), Error> {
                 fps_frames = 0;
                 fps_last = Instant::now();
             }
-            let fps_text = format!("FPS: {:.0}", fps_value);
-            let scale: u32 = 2;
-            let advance = 5 * scale + scale; // glyph width + spacing
-            let text_w: u32 = fps_text.chars().count() as u32 * advance;
-            let fps_x: u32 = WIDTH.saturating_sub(text_w + 8);
-            let fps_y: u32 = 8;
-            draw_text(frame, &fps_text, fps_x, fps_y, scale, (80, 255, 120, 255));
+            #[cfg(not(feature = "gpu-render"))]
+            {
+                let fps_text = format!("FPS: {:.0}", fps_value);
+                let scale: u32 = 2;
+                let advance = 5 * scale + scale; // glyph width + spacing
+                let text_w: u32 = fps_text.chars().count() as u32 * advance;
+                let fps_x: u32 = WIDTH.saturating_sub(text_w + 8);
+                let fps_y: u32 = 8;
+                draw_text(frame, &fps_text, fps_x, fps_y, scale, (80, 255, 120, 255));
+            }
 
-            if pixels.render().is_err() {
-                *control_flow = ControlFlow::Exit;
+            #[cfg(not(feature = "gpu-render"))]
+            {
+                if pixels.render().is_err() {
+                    *control_flow = ControlFlow::Exit;
+                }
+            }
+            #[cfg(feature = "gpu-render")]
+            {
+                // Build instances for gpu renderer
+                let mut instances: Vec<gpu_render::Instance> = Vec::with_capacity(1024);
+                // Background grid is drawn in shader. Add apple and snakes.
+                let push_snake = |g: &Game, alpha: f32, color: (u8,u8,u8), out: &mut Vec<gpu_render::Instance>| {
+                    if !g.alive { return; }
+                    // Apple
+                    out.push(gpu_render::Instance { gx: g.apple.x as u32, gy: g.apple.y as u32, r: 0.86, g: 0.2, b: 0.2, a: alpha });
+                    // Snake segments
+                    let (cr, cg, cb) = (color.0 as f32 / 255.0, color.1 as f32 / 255.0, color.2 as f32 / 255.0);
+                    for (i, &pos) in g.snake.iter().enumerate() {
+                        let fade = if i == 0 { 1.3 } else { (1.0 - (i as f32 * 0.015)).clamp(0.5, 1.0) };
+                        out.push(gpu_render::Instance {
+                            gx: pos.x as u32,
+                            gy: pos.y as u32,
+                            r: (cr * fade).min(1.0),
+                            g: (cg * fade).min(1.0),
+                            b: (cb * fade).min(1.0),
+                            a: alpha,
+                        });
+                    }
+                };
+
+                if evo.training {
+                    if ultra_fast {
+                        // nothing to draw
+                    } else if show_only_best {
+                        if let Some(best_game_idx) = evo
+                            .scores
+                            .iter()
+                            .enumerate()
+                            .max_by_key(|(_, score)| *score)
+                            .map(|(idx, _)| idx)
+                            && best_game_idx < evo.pop.len()
+                            && best_game_idx < evo.games.len()
+                        {
+                            let agent_color = evo.pop[best_game_idx].color;
+                            push_snake(&evo.games[best_game_idx], 0.86, agent_color, &mut instances);
+                        }
+                    } else if evo_steps_per_frame < 4_096 {
+                        for (agent, g) in evo.pop.iter().zip(evo.games.iter()) {
+                            push_snake(g, 0.7, agent.color, &mut instances);
+                        }
+                    } else if let Some(best_game_idx) = evo
+                        .scores
+                        .iter()
+                        .enumerate()
+                        .max_by_key(|(_, score)| *score)
+                        .map(|(idx, _)| idx)
+                        && best_game_idx < evo.pop.len()
+                        && best_game_idx < evo.games.len()
+                    {
+                        let agent_color = evo.pop[best_game_idx].color;
+                        push_snake(&evo.games[best_game_idx], 0.86, agent_color, &mut instances);
+                    }
+                } else {
+                    // Normal game
+                    push_snake(&game, 1.0, (80, 220, 80), &mut instances);
+                }
+
+                if let Err(e) = gpu.render(&instances) {
+                    eprintln!("gpu present failed: {e}");
+                    *control_flow = ControlFlow::Exit;
+                }
             }
         }
 
         // Handle window resize
-        if let Event::WindowEvent { event, .. } = &event
-            && let winit::event::WindowEvent::Resized(new_size) = event
-            && let Err(e) = pixels.resize_surface(new_size.width, new_size.height)
-        {
-            eprintln!("Failed to resize surface: {}", e);
-            *control_flow = ControlFlow::Exit;
-            return;
+        if let Event::WindowEvent { event, .. } = &event {
+            if let winit::event::WindowEvent::Resized(new_size) = event {
+                #[cfg(not(feature = "gpu-render"))]
+                if let Err(e) = pixels.resize_surface(new_size.width, new_size.height) {
+                    eprintln!("Failed to resize surface: {}", e);
+                    *control_flow = ControlFlow::Exit;
+                    return;
+                }
+                #[cfg(feature = "gpu-render")]
+                {
+                    gpu.resize(new_size.width, new_size.height);
+                }
+            }
         }
 
         if input.update(&event) {
@@ -1555,6 +1647,7 @@ fn main() -> Result<(), Error> {
             }
 
             // Mouse clicks on overlay buttons
+            #[cfg(not(feature = "gpu-render"))]
             if let Some((mx, my)) = input.mouse()
                 && input.mouse_pressed(0)
             {
@@ -1905,6 +1998,7 @@ fn main() -> Result<(), Error> {
 // ============================
 
 /// Clear the entire frame buffer to a single RGBA color.
+#[cfg(not(feature = "gpu-render"))]
 fn clear_rgba(frame: &mut [u8], r: u8, g: u8, b: u8, a: u8) {
     for px in frame.chunks_exact_mut(4) {
         px[0] = r;
@@ -1915,6 +2009,7 @@ fn clear_rgba(frame: &mut [u8], r: u8, g: u8, b: u8, a: u8) {
 }
 
 /// Alpha-blend a pixel into the frame at (x,y).
+#[cfg(not(feature = "gpu-render"))]
 fn blend_pixel(frame: &mut [u8], x: u32, y: u32, r: u8, g: u8, b: u8, a: u8) {
     if x >= WIDTH || y >= HEIGHT {
         return;
@@ -1936,6 +2031,7 @@ fn blend_pixel(frame: &mut [u8], x: u32, y: u32, r: u8, g: u8, b: u8, a: u8) {
 
 /// Fill an axis-aligned rectangle with an RGBA color (alpha-blended per pixel).
 #[allow(clippy::too_many_arguments)]
+#[cfg(not(feature = "gpu-render"))]
 fn fill_rect_rgba(frame: &mut [u8], x: u32, y: u32, w: u32, h: u32, r: u8, g: u8, b: u8, a: u8) {
     let x2 = (x + w).min(WIDTH);
     let y2 = (y + h).min(HEIGHT);
@@ -1948,6 +2044,7 @@ fn fill_rect_rgba(frame: &mut [u8], x: u32, y: u32, w: u32, h: u32, r: u8, g: u8
 
 /// Draw a rectangle border with an RGBA color.
 #[allow(clippy::too_many_arguments)]
+#[cfg(not(feature = "gpu-render"))]
 fn stroke_rect_rgba(frame: &mut [u8], x: u32, y: u32, w: u32, h: u32, r: u8, g: u8, b: u8, a: u8) {
     if w == 0 || h == 0 {
         return;
@@ -1965,6 +2062,7 @@ fn stroke_rect_rgba(frame: &mut [u8], x: u32, y: u32, w: u32, h: u32, r: u8, g: 
 }
 
 /// Fill a single grid cell with an opaque RGB color.
+#[cfg(not(feature = "gpu-render"))]
 fn fill_cell_rgb(frame: &mut [u8], grid_x: u32, grid_y: u32, r: u8, g: u8, b: u8) {
     let x = grid_x * GRID_SIZE;
     let y = grid_y * GRID_SIZE;
@@ -1972,6 +2070,7 @@ fn fill_cell_rgb(frame: &mut [u8], grid_x: u32, grid_y: u32, r: u8, g: u8, b: u8
 }
 
 /// Fill a single grid cell with an RGBA color.
+#[cfg(not(feature = "gpu-render"))]
 fn fill_cell_rgba(frame: &mut [u8], grid_x: u32, grid_y: u32, r: u8, g: u8, b: u8, a: u8) {
     let x = grid_x * GRID_SIZE;
     let y = grid_y * GRID_SIZE;
@@ -1979,6 +2078,7 @@ fn fill_cell_rgba(frame: &mut [u8], grid_x: u32, grid_y: u32, r: u8, g: u8, b: u
 }
 
 /// Draw the game semi-transparently, tinting the snake by `color` (used to show many agents).
+#[cfg(not(feature = "gpu-render"))]
 fn draw_game_transparent(frame: &mut [u8], game: &Game, alpha: u8, color: (u8, u8, u8)) {
     if !game.alive {
         return;
@@ -2033,6 +2133,7 @@ fn draw_game_transparent(frame: &mut [u8], game: &Game, alpha: u8, color: (u8, u
 }
 
 /// Draw a simple UI button with a text label.
+#[cfg(not(feature = "gpu-render"))]
 fn draw_button(frame: &mut [u8], x: u32, y: u32, w: u32, h: u32, label: &str) {
     fill_rect_rgba(frame, x, y, w, h, 40, 40, 60, 160);
     stroke_rect_rgba(frame, x, y, w, h, 200, 200, 220, 120);
@@ -2047,11 +2148,13 @@ fn draw_button(frame: &mut [u8], x: u32, y: u32, w: u32, h: u32, label: &str) {
 }
 
 /// Check whether a point lies within a rectangle.
+#[cfg(not(feature = "gpu-render"))]
 fn point_in_rect(px: u32, py: u32, x: u32, y: u32, w: u32, h: u32) -> bool {
     px >= x && py >= y && px < x + w && py < y + h
 }
 
 /// Returns a 5x7 bitmap glyph for a limited set of characters (ASCII-like UI font).
+#[cfg(not(feature = "gpu-render"))]
 fn glyph_5x7(ch: char) -> Option<[u8; 7]> {
     let c = ch.to_ascii_uppercase();
     Some(match c {
@@ -2180,6 +2283,7 @@ fn glyph_5x7(ch: char) -> Option<[u8; 7]> {
 }
 
 /// Draw a single bitmap character and return its advance in pixels.
+#[cfg(not(feature = "gpu-render"))]
 fn draw_char(frame: &mut [u8], ch: char, x: u32, y: u32, scale: u32, col: (u8, u8, u8, u8)) -> u32 {
     if let Some(rows) = glyph_5x7(ch) {
         for (ry, row) in rows.iter().enumerate() {
@@ -2208,6 +2312,7 @@ fn draw_char(frame: &mut [u8], ch: char, x: u32, y: u32, scale: u32, col: (u8, u
 }
 
 /// Draw a text string using the 5x7 glyph font.
+#[cfg(not(feature = "gpu-render"))]
 fn draw_text(frame: &mut [u8], text: &str, x: u32, y: u32, scale: u32, col: (u8, u8, u8, u8)) {
     let mut cx = x;
     for ch in text.chars() {
@@ -2216,6 +2321,7 @@ fn draw_text(frame: &mut [u8], text: &str, x: u32, y: u32, scale: u32, col: (u8,
 }
 
 /// Draw a simple bar chart of best scores per epoch.
+#[cfg(not(feature = "gpu-render"))]
 fn draw_chart(frame: &mut [u8], x: u32, y: u32, w: u32, h: u32, data: &[usize]) {
     stroke_rect_rgba(frame, x, y, w, h, 200, 200, 200, 120);
     if data.is_empty() {
