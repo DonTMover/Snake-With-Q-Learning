@@ -90,15 +90,8 @@ jobs:
           $srcPdb = "target/release/Snake-With-Q-Learning.pdb"
           if (Test-Path $srcExe) { Copy-Item $srcExe "target/release/snake-default.exe" -Force }
           if (Test-Path $srcPdb) { Copy-Item $srcPdb "target/release/snake-default.pdb" -Force }
-      - name: Build release (dqn-gpu CPU)
-        run: cargo build --release --no-default-features --features "dqn-gpu"
-      - name: Preserve DQN exe name
-        shell: pwsh
-        run: |
-          $srcExe = "target/release/Snake-With-Q-Learning.exe"
-          $srcPdb = "target/release/Snake-With-Q-Learning.pdb"
-          if (Test-Path $srcExe) { Copy-Item $srcExe "target/release/snake-dqn.exe" -Force }
-          if (Test-Path $srcPdb) { Copy-Item $srcPdb "target/release/snake-dqn.pdb" -Force }
+      - name: Build release (DQN auto CUDA/CPU)
+        run: .\build_dqn_windows.cmd release
       - name: Create GitHub Release (tagged)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2

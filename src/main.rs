@@ -85,6 +85,7 @@ enum Dir {
 enum DeathCause {
     None,
     SelfCollision,
+    Wall,
 }
 
 /// Game state: snake body, apple, direction, score and flags.
@@ -97,11 +98,16 @@ struct Game {
     score: usize,
     paused: bool,
     last_death: DeathCause,
+    wrap_world: bool, // if false, walls are solid and cause death
 }
 
 impl Game {
     /// Create a new game with a short snake centered on the grid and a random apple.
     fn new() -> Self {
+        Self::new_with_wrap(true)
+    }
+
+    fn new_with_wrap(wrap_world: bool) -> Self {
         let start_x = (GRID_WIDTH / 2) as i32;
         let start_y = (GRID_HEIGHT / 2) as i32;
         let mut snake = VecDeque::new();
@@ -125,6 +131,7 @@ impl Game {
             paused: false,
             snake_set,
             last_death: DeathCause::None,
+            wrap_world,
         };
         game.place_apple();
         game
@@ -154,7 +161,7 @@ impl Game {
         self.last_death = DeathCause::None;
 
         let head = self.snake.front().unwrap();
-        // Move head with toroidal wrapping across edges
+        // Move head; either wrap around or collide with walls
         let mut new_x = head.x;
         let mut new_y = head.y;
         match self.dir {
@@ -163,15 +170,24 @@ impl Game {
             Dir::Left => new_x -= 1,
             Dir::Right => new_x += 1,
         }
-        if new_x < 0 {
-            new_x = GRID_WIDTH as i32 - 1;
-        } else if new_x >= GRID_WIDTH as i32 {
-            new_x = 0;
-        }
-        if new_y < 0 {
-            new_y = GRID_HEIGHT as i32 - 1;
-        } else if new_y >= GRID_HEIGHT as i32 {
-            new_y = 0;
+        if self.wrap_world {
+            if new_x < 0 {
+                new_x = GRID_WIDTH as i32 - 1;
+            } else if new_x >= GRID_WIDTH as i32 {
+                new_x = 0;
+            }
+            if new_y < 0 {
+                new_y = GRID_HEIGHT as i32 - 1;
+            } else if new_y >= GRID_HEIGHT as i32 {
+                new_y = 0;
+            }
+        } else {
+            // Solid walls
+            if new_x < 0 || new_x >= GRID_WIDTH as i32 || new_y < 0 || new_y >= GRID_HEIGHT as i32 {
+                self.last_death = DeathCause::Wall;
+                self.alive = false;
+                return;
+            }
         }
         let new_head = Pos::new(new_x, new_y);
 
@@ -432,6 +448,7 @@ struct EvoTrainer {
     champion_epoch: usize,             // epoch when champion was found
     epochs_without_improvement: usize, // counter for stagnation
     restart_count: usize,              // number of restarts performed
+    wrap_world: bool,                  // whether to wrap or collide with walls
 }
 
 impl EvoTrainer {
@@ -445,7 +462,7 @@ impl EvoTrainer {
 
         for &(r, g, b) in colors.iter().take(pop_size) {
             pop.push(QAgent::new_with_color(r, g, b));
-            games.push(Game::new());
+            games.push(Game::new_with_wrap(true));
         }
         let max_apples = (GRID_WIDTH as usize * GRID_HEIGHT as usize).saturating_sub(3); // 3 is initial snake length
         Self {
@@ -467,6 +484,7 @@ impl EvoTrainer {
             champion_epoch: 0,
             epochs_without_improvement: 0,
             restart_count: 0,
+            wrap_world: true,
         }
     }
 
@@ -512,8 +530,14 @@ impl EvoTrainer {
         self.steps_taken = 0;
         self.scores.fill(0);
         for i in 0..self.pop_size {
-            self.games[i] = Game::new();
+            self.games[i] = Game::new_with_wrap(self.wrap_world);
         }
+    }
+
+    /// Set wrapping mode and reinitialize all games with the chosen behavior.
+    fn set_wrap_world(&mut self, wrap: bool) {
+        self.wrap_world = wrap;
+        self.reset_epoch();
     }
 
     /// Reproduce a new generation with elitism, mutation, and adaptive restarts.
@@ -1032,6 +1056,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         dqn_mode = true;
                         dqn_agent = Some(agent);
                         println!("[DQN] auto-enabled (device: Cuda(0))");
+                        // Prefer solid walls for DQN training
+                        evo.set_wrap_world(false);
+                        println!("[DQN] using solid walls (no wrap) for training");
                         if !evo.training {
                             evo.training = true;
                             println!("[hint] CUDA detected: auto-starting Evolution with DQN");
@@ -1625,6 +1652,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Ok(agent) => {
                                 dqn_agent = Some(agent);
                                 println!("[DQN] enabled (device: {})", dev_print);
+                                evo.set_wrap_world(false);
+                                println!("[DQN] using solid walls (no wrap) for training");
                                 if !evo.training {
                                     println!(
                                         "[hint] DQN is active only during Evolution. Press E to start training."
@@ -1639,6 +1668,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         dqn_agent = None;
                         println!("[DQN] disabled");
+                        // Restore default wrap mode when DQN is off
+                        evo.set_wrap_world(true);
                     }
                 }
             }
@@ -1805,6 +1836,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let mut _reward = if died {
                                         match g.last_death {
                                             DeathCause::SelfCollision => -30.0,
+                                            DeathCause::Wall => -20.0,
                                             DeathCause::None => -12.0,
                                         }
                                     } else if ate {
@@ -1855,6 +1887,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let mut reward = if died {
                                         match g.last_death {
                                             DeathCause::SelfCollision => -30.0,
+                                            DeathCause::Wall => -20.0,
                                             DeathCause::None => -12.0,
                                         }
                                     } else if ate {
@@ -1910,6 +1943,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let mut reward = if died {
                                     match g.last_death {
                                         DeathCause::SelfCollision => -30.0,
+                                        DeathCause::Wall => -20.0,
                                         DeathCause::None => -12.0,
                                     }
                                 } else if ate {

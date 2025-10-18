@@ -5,6 +5,7 @@ use candle::Tensor;
 use candle::Device;
 use candle_nn as nn;
 use candle_nn::{Module, VarBuilder, Optimizer};
+use rand::Rng;
 
 const ACTIONS: usize = 3;
 
@@ -73,6 +74,9 @@ pub struct DqnAgent {
     pub replay: Replay,
     pub gamma: f32,
     pub input_vocab: usize,
+    pub epsilon: f32,
+    pub min_epsilon: f32,
+    pub decay: f32,
 }
 
 impl DqnAgent {
@@ -82,11 +86,15 @@ impl DqnAgent {
         let net = DqnNet::new(vb, device, input_vocab, hidden)?;
         // Optimizer over all variables in the model
         let opt = nn::AdamW::new_lr(varmap.all_vars(), 1e-3)?;
-        Ok(Self { net, opt, replay: Replay::new(20000), gamma: 0.99, input_vocab })
+        Ok(Self { net, opt, replay: Replay::new(20000), gamma: 0.99, input_vocab, epsilon: 0.25, min_epsilon: 0.05, decay: 0.999 })
     }
 
     pub fn select_action(&self, state: u32) -> candle::Result<usize> {
-    let s = Tensor::new(&[state % self.input_vocab as u32], &self.net.device)?; // [1]
+        // Epsilon-greedy for exploration
+        if rand::thread_rng().r#gen::<f32>() < self.epsilon {
+            return Ok(rand::thread_rng().gen_range(0..ACTIONS));
+        }
+        let s = Tensor::new(&[state % self.input_vocab as u32], &self.net.device)?; // [1]
         let q = self.net.q_values(&s)?; // [1, 3]
         let idxs = q.argmax(1)?; // indices along dim=1, shape [1]
         let v = idxs.to_vec1::<i64>()?;
@@ -128,6 +136,9 @@ impl DqnAgent {
         let loss = (q_a - target)?.sqr()?.mean(0)?;        // MSE
 
         self.opt.backward_step(&loss)?;
+        // Decay exploration a bit each step
+        let new_eps = self.epsilon * self.decay;
+        self.epsilon = new_eps.max(self.min_epsilon);
         Ok(())
     }
 }
