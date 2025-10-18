@@ -21,7 +21,7 @@
 //! - Rewards: +apple, -death, small step cost, shaping for distance improvement
 //! - Evolution: elitism, mutation, and staged restarts on stagnation
 
-#[cfg(feature = "gpu-nn-experimental")]
+#[cfg(all(feature = "gpu-nn-experimental", feature = "gpu-nn"))]
 mod gpu_nn;
 
 use ahash::AHashMap;
@@ -983,7 +983,7 @@ fn main() -> Result<(), Error> {
     let mut evo = EvoTrainer::new(24); // увеличенная популяция для более быстрого поиска решений
     #[cfg(feature = "gpu-nn")]
     let mut nn_mode: bool = false;
-    #[cfg(feature = "gpu-nn-experimental")]
+    #[cfg(all(feature = "gpu-nn-experimental", feature = "gpu-nn"))]
     let mut nn_trainer: Option<gpu_nn::GpuTrainer> = Some(gpu_nn::GpuTrainer::new(256, 128, 3));
 
     // Try to load saved agent and auto-start training if found
@@ -1584,8 +1584,8 @@ fn main() -> Result<(), Error> {
                 }
             }
 
-            // Evolutionary training loop (population of agents - parallelized with rayon)
-            if evo.training {
+                    // Evolutionary training loop (population of agents)
+                    if evo.training {
                 let steps_per_frame: u32 = evo_steps_per_frame.max(1);
                 if game.paused {
                     window.request_redraw();
@@ -1600,83 +1600,155 @@ fn main() -> Result<(), Error> {
                     let mut all_done = true;
                     let target_score = evo.target_score;
                     let len = evo.pop.len().min(evo.games.len()).min(evo.scores.len());
-                    // Parallel iterate zipped mutable slices safely
-                    let (pop_slice, _) = evo.pop.split_at_mut(len);
-                    let (games_slice, _) = evo.games.split_at_mut(len);
-                    let (scores_slice, _) = evo.scores.split_at_mut(len);
-                    let solved_flag = AtomicBool::new(false);
+                    // Two paths: GPU NN inference (sequential/batched) vs CPU tabular Q-learning (parallel)
+                    #[cfg(all(feature = "gpu-nn-experimental", feature = "gpu-nn"))]
+                    let nn_active = nn_mode && nn_trainer.is_some();
+                    #[cfg(not(all(feature = "gpu-nn-experimental", feature = "gpu-nn")))]
+                    let nn_active = false;
 
-                    pop_slice
-                        .par_iter_mut()
-                        .zip(games_slice.par_iter_mut())
-                        .zip(scores_slice.par_iter_mut())
-                        .for_each(|((agent, g), score_ref)| {
-                            if !g.alive || *score_ref >= target_score {
-                                return;
-                            }
-                            // local RNG per thread (SmallRng)
-                            let mut local_rng = SmallRng::from_entropy();
-                            let s = state_key(g);
-                            let a_idx = agent.select_action(s, &mut local_rng);
-                            g.change_dir(dir_after_action(g.dir, a_idx));
-                            let before_score = g.score;
-                            let was_alive = g.alive;
-                            let head0 = *g.snake.front().unwrap();
-                            let d0 = (g.apple.x - head0.x).abs() + (g.apple.y - head0.y).abs();
-                            g.update();
-                            let ate = g.score > before_score;
-                            let died = was_alive && !g.alive;
-                            let head1 = *g.snake.front().unwrap();
-                            let d1 = (g.apple.x - head1.x).abs() + (g.apple.y - head1.y).abs();
-                            let length1 = g.snake.len();
-
-                            // Death penalties: self-collision is the heaviest crime
-                            let mut reward = if died {
-                                match g.last_death {
-                                    DeathCause::SelfCollision => -30.0,
-                                    DeathCause::None => -12.0,
-                                }
-                            } else if ate {
-                                10.0 + (length1 as f32 * 0.1)
-                            } else {
-                                -0.005
-                            };
-                            if !died && !ate {
-                                if d1 < d0 {
-                                    reward += 0.05;
-                                } else if d1 > d0 {
-                                    reward -= 0.03;
-                                }
-                                if d1 <= 3 && !ate {
-                                    reward += 0.02;
+                    if nn_active {
+                        // Batched GPU policy inference for alive agents
+                        #[cfg(all(feature = "gpu-nn-experimental", feature = "gpu-nn"))]
+                        {
+                            let trainer = nn_trainer.as_ref().unwrap();
+                            // Collect indices and states
+                            let mut idxs: Vec<usize> = Vec::with_capacity(len);
+                            let mut states: Vec<u32> = Vec::with_capacity(len);
+                            for i in 0..len {
+                                if evo.games[i].alive && evo.scores[i] < target_score {
+                                    idxs.push(i);
+                                    let s = state_key(&evo.games[i]);
+                                    states.push(s % 256); // keep within input size used at init
                                 }
                             }
+                            if !idxs.is_empty() {
+                                let probs = trainer.infer_to_vec(&states, 256, 3);
+                                // Apply actions and update each game sequentially
+                                for (k, &i) in idxs.iter().enumerate() {
+                                    let p0 = probs[k * 3];
+                                    let p1 = probs[k * 3 + 1];
+                                    let p2 = probs[k * 3 + 2];
+                                    let a_idx = if p0 >= p1 && p0 >= p2 { 0 } else if p1 >= p2 { 1 } else { 2 };
 
-                            let ns = state_key(g);
-                            agent.learn(s, a_idx, reward, ns, died || !g.alive);
-                            agent.steps += 1;
-                            if died {
-                                agent.episodes += 1;
-                                agent.epsilon =
-                                    (agent.epsilon * agent.decay).max(agent.min_epsilon);
-                            }
-                            if g.alive {
-                                *score_ref = g.score;
-                            }
-                            if g.score >= target_score {
-                                solved_flag.store(true, Ordering::Relaxed);
-                            }
-                        });
+                                    let g = &mut evo.games[i];
+                                    g.change_dir(dir_after_action(g.dir, a_idx));
+                                    let before_score = g.score;
+                                    let was_alive = g.alive;
+                                    let head0 = *g.snake.front().unwrap();
+                                    let d0 = (g.apple.x - head0.x).abs() + (g.apple.y - head0.y).abs();
+                                    g.update();
+                                    let ate = g.score > before_score;
+                                    let died = was_alive && !g.alive;
+                                    let head1 = *g.snake.front().unwrap();
+                                    let d1 = (g.apple.x - head1.x).abs() + (g.apple.y - head1.y).abs();
+                                    let length1 = g.snake.len();
 
-                    if solved_flag.load(Ordering::Relaxed) {
-                        evo.solved = true;
-                        evo.training = false;
-                    } else if scores_slice
-                        .iter()
-                        .zip(games_slice.iter())
-                        .any(|(s, g)| g.alive && *s < target_score)
-                    {
-                        all_done = false;
+                                    // Reward (used only for epoch/score decisions here)
+                                    let mut _reward = if died {
+                                        match g.last_death {
+                                            DeathCause::SelfCollision => -30.0,
+                                            DeathCause::None => -12.0,
+                                        }
+                                    } else if ate {
+                                        10.0 + (length1 as f32 * 0.1)
+                                    } else {
+                                        -0.005
+                                    };
+                                    if !died && !ate {
+                                        if d1 < d0 { _reward += 0.05; } else if d1 > d0 { _reward -= 0.03; }
+                                        if d1 <= 3 && !ate { _reward += 0.02; }
+                                    }
+
+                                    if g.alive {
+                                        evo.scores[i] = g.score;
+                                    }
+                                }
+                            }
+
+                            // Check solved/all_done
+                            if evo.scores.iter().zip(evo.games.iter()).any(|(s, g)| g.alive && *s < target_score) {
+                                all_done = false;
+                            }
+                        }
+                    } else {
+                        // CPU tabular Q-learning path (parallel)
+                        let (pop_slice, _) = evo.pop.split_at_mut(len);
+                        let (games_slice, _) = evo.games.split_at_mut(len);
+                        let (scores_slice, _) = evo.scores.split_at_mut(len);
+                        let solved_flag = AtomicBool::new(false);
+
+                        pop_slice
+                            .par_iter_mut()
+                            .zip(games_slice.par_iter_mut())
+                            .zip(scores_slice.par_iter_mut())
+                            .for_each(|((agent, g), score_ref)| {
+                                if !g.alive || *score_ref >= target_score {
+                                    return;
+                                }
+                                // local RNG per thread (SmallRng)
+                                let mut local_rng = SmallRng::from_entropy();
+                                let s = state_key(g);
+                                let a_idx = agent.select_action(s, &mut local_rng);
+                                g.change_dir(dir_after_action(g.dir, a_idx));
+                                let before_score = g.score;
+                                let was_alive = g.alive;
+                                let head0 = *g.snake.front().unwrap();
+                                let d0 = (g.apple.x - head0.x).abs() + (g.apple.y - head0.y).abs();
+                                g.update();
+                                let ate = g.score > before_score;
+                                let died = was_alive && !g.alive;
+                                let head1 = *g.snake.front().unwrap();
+                                let d1 = (g.apple.x - head1.x).abs() + (g.apple.y - head1.y).abs();
+                                let length1 = g.snake.len();
+
+                                // Death penalties: self-collision is the heaviest crime
+                                let mut reward = if died {
+                                    match g.last_death {
+                                        DeathCause::SelfCollision => -30.0,
+                                        DeathCause::None => -12.0,
+                                    }
+                                } else if ate {
+                                    10.0 + (length1 as f32 * 0.1)
+                                } else {
+                                    -0.005
+                                };
+                                if !died && !ate {
+                                    if d1 < d0 {
+                                        reward += 0.05;
+                                    } else if d1 > d0 {
+                                        reward -= 0.03;
+                                    }
+                                    if d1 <= 3 && !ate {
+                                        reward += 0.02;
+                                    }
+                                }
+
+                                let ns = state_key(g);
+                                agent.learn(s, a_idx, reward, ns, died || !g.alive);
+                                agent.steps += 1;
+                                if died {
+                                    agent.episodes += 1;
+                                    agent.epsilon =
+                                        (agent.epsilon * agent.decay).max(agent.min_epsilon);
+                                }
+                                if g.alive {
+                                    *score_ref = g.score;
+                                }
+                                if g.score >= target_score {
+                                    solved_flag.store(true, Ordering::Relaxed);
+                                }
+                            });
+
+                        if solved_flag.load(Ordering::Relaxed) {
+                            evo.solved = true;
+                            evo.training = false;
+                        } else if scores_slice
+                            .iter()
+                            .zip(games_slice.iter())
+                            .any(|(s, g)| g.alive && *s < target_score)
+                        {
+                            all_done = false;
+                        }
                     }
 
                     // Determine if there is a unique leading agent who should bypass the step limit
