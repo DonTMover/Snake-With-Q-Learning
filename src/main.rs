@@ -43,6 +43,8 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::WindowBuilder;
 use winit_input_helper::WinitInputHelper;
 
+#[cfg(feature = "dqn-gpu")]
+mod dqn;
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 600;
 const GRID_SIZE: u32 = 20;
@@ -983,6 +985,10 @@ fn main() -> Result<(), Error> {
     let mut evo = EvoTrainer::new(24); // увеличенная популяция для более быстрого поиска решений
     #[cfg(feature = "gpu-nn")]
     let mut nn_mode: bool = false;
+    #[cfg(feature = "dqn-gpu")]
+    let mut dqn_mode: bool = false; // toggle DQN training
+    #[cfg(feature = "dqn-gpu")]
+    let mut dqn_agent: Option<dqn::DqnAgent> = None;
     #[cfg(all(feature = "gpu-nn-experimental", feature = "gpu-nn"))]
     let mut nn_trainer: Option<gpu_nn::GpuTrainer> = Some(gpu_nn::GpuTrainer::new(256, 128, 3));
 
@@ -1486,6 +1492,29 @@ fn main() -> Result<(), Error> {
                 show_only_best = !show_only_best;
             }
 
+            #[cfg(feature = "dqn-gpu")]
+            {
+                if input.key_pressed(VirtualKeyCode::J) {
+                    dqn_mode = !dqn_mode;
+                    if dqn_mode {
+                        let dev = dqn::preferred_device();
+                        match dqn::DqnAgent::new(1024, 256, dev) {
+                            Ok(agent) => {
+                                dqn_agent = Some(agent);
+                                println!("[DQN] enabled (device: {:?})", dev);
+                            }
+                            Err(e) => {
+                                dqn_mode = false;
+                                eprintln!("[DQN] init failed: {}", e);
+                            }
+                        }
+                    } else {
+                        dqn_agent = None;
+                        println!("[DQN] disabled");
+                    }
+                }
+            }
+
             // Speed controls (keyboard)
             if evo.training {
                 if input.key_pressed(VirtualKeyCode::NumpadAdd)
@@ -1671,6 +1700,53 @@ fn main() -> Result<(), Error> {
                             }
                         }
                     } else {
+                        // If DQN mode is enabled, use a single shared DQN for action selection & learning
+                        #[cfg(feature = "dqn-gpu")]
+                        if dqn_mode {
+                            if let Some(agent) = dqn_agent.as_mut() {
+                                // Iterate sequentially to accumulate transitions
+                                for i in 0..len {
+                                    let g = &mut evo.games[i];
+                                    if !g.alive || evo.scores[i] >= target_score { continue; }
+                                    let s = state_key(g) % agent.input_vocab as u32;
+                                    // Greedy action from DQN
+                                    let a_idx = agent.select_action(s).unwrap_or(1);
+                                    g.change_dir(dir_after_action(g.dir, a_idx));
+                                    let before_score = g.score;
+                                    let was_alive = g.alive;
+                                    let head0 = *g.snake.front().unwrap();
+                                    let d0 = (g.apple.x - head0.x).abs() + (g.apple.y - head0.y).abs();
+                                    g.update();
+                                    let ate = g.score > before_score;
+                                    let died = was_alive && !g.alive;
+                                    let head1 = *g.snake.front().unwrap();
+                                    let d1 = (g.apple.x - head1.x).abs() + (g.apple.y - head1.y).abs();
+                                    let length1 = g.snake.len();
+                                    // Reward shaping identical to tabular path
+                                    let mut reward = if died {
+                                        match g.last_death {
+                                            DeathCause::SelfCollision => -30.0,
+                                            DeathCause::None => -12.0,
+                                        }
+                                    } else if ate {
+                                        10.0 + (length1 as f32 * 0.1)
+                                    } else { -0.005 };
+                                    if !died && !ate {
+                                        if d1 < d0 { reward += 0.05; } else if d1 > d0 { reward -= 0.03; }
+                                        if d1 <= 3 && !ate { reward += 0.02; }
+                                    }
+                                    let ns = state_key(g) % agent.input_vocab as u32;
+                                    agent.push_transition(s, a_idx, reward, ns, died || !g.alive);
+                                    if g.alive { evo.scores[i] = g.score; }
+                                }
+                                // Train a few steps per iteration
+                                let _ = agent.train_step(256);
+                            }
+                            // all_done check
+                            if evo.scores.iter().zip(evo.games.iter()).any(|(s, g)| g.alive && *s < target_score) {
+                                all_done = false;
+                            }
+                        } else {
                         // CPU tabular Q-learning path (parallel)
                         let (pop_slice, _) = evo.pop.split_at_mut(len);
                         let (games_slice, _) = evo.games.split_at_mut(len);
@@ -1748,6 +1824,7 @@ fn main() -> Result<(), Error> {
                             .any(|(s, g)| g.alive && *s < target_score)
                         {
                             all_done = false;
+                        }
                         }
                     }
 
