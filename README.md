@@ -34,6 +34,18 @@ An interactive Snake game with an optional evolutionary Q-learning trainer. The 
 - Quit: Esc or close window
 - Mouse: Click panel buttons (Pause/Resume, Speed+, Restart, Save, Hide/Show)
 
+### NPU (DirectML) model
+
+When you toggle NPU mode (K), the app looks for an ONNX model (default name `snake_dqn.onnx`). You can:
+
+- Set an explicit path via environment variable `SNAKE_NPU_ONNX`, or
+- Place `snake_dqn.onnx` in one of these locations relative to the executable:
+  - `./`
+  - `models/`
+  - `assets/`
+  - `target/release/` or `target/debug/`
+
+If the model can’t be found, you’ll see a helpful error with instructions.
 ## Build and Run
 
 Prerequisites:

@@ -43,6 +43,28 @@ use winit::event::{Event, VirtualKeyCode};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::WindowBuilder;
 use winit_input_helper::WinitInputHelper;
+// Helper to locate the ONNX model for NPU mode on Windows
+#[cfg(all(target_os = "windows", feature = "npu-directml"))]
+fn find_npu_onnx_model() -> Option<String> {
+    use std::env;
+    use std::path::Path;
+
+    if let Ok(p) = env::var("SNAKE_NPU_ONNX") {
+        if Path::new(&p).exists() {
+            return Some(p);
+        }
+    }
+
+    let candidates = [
+        "snake_dqn.onnx",
+        "models/snake_dqn.onnx",
+        "assets/snake_dqn.onnx",
+        "target/release/snake_dqn.onnx",
+        "target/debug/snake_dqn.onnx",
+    ];
+    for c in candidates { if Path::new(c).exists() { return Some(c.to_string()); } }
+    None
+}
 
 #[cfg(feature = "gpu-render")]
 mod gpu_render;
@@ -1635,10 +1657,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if input.key_pressed(VirtualKeyCode::K) {
                     npu_mode = !npu_mode;
                     if npu_mode {
-                        match npu::NpuPolicy::load("snake_dqn.onnx", 1024, 3) {
+                        let Some(model_path) = find_npu_onnx_model() else {
+                            npu_mode = false;
+                            eprintln!(
+                                "[NPU] ONNX model not found. Provide it via:\n  - Env var SNAKE_NPU_ONNX=<path-to-onnx>\n  - Or place 'snake_dqn.onnx' in one of: ./, models/, assets/, target/(debug|release)/"
+                            );
+                            // do not attempt to load
+                            return;
+                        };
+                        match npu::NpuPolicy::load(&model_path, 1024, 3) {
                             Ok(p) => {
                                 npu_policy = Some(p);
-                                println!("[NPU] DirectML policy loaded (ONNX): snake_dqn.onnx");
+                                println!("[NPU] DirectML policy loaded (ONNX): {}", model_path);
                                 if !evo.training {
                                     println!("[hint] NPU policy is used during Evolution (E). Press E to start training.");
                                 }
@@ -1646,6 +1676,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Err(e) => {
                                 npu_mode = false;
                                 eprintln!("[NPU] failed to load ONNX model: {}", e);
+                                eprintln!("       Set SNAKE_NPU_ONNX or place the model at a supported path.");
                             }
                         }
                     } else {
@@ -1899,7 +1930,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // NPU DirectML path (inference-only)
                     #[cfg(all(target_os = "windows", feature = "npu-directml"))]
                     if !handled_path && npu_mode {
-                        if let Some(policy) = npu_policy.as_ref() {
+                        if let Some(policy) = npu_policy.as_mut() {
                             for i in 0..len {
                                 let g = &mut evo.games[i];
                                 if !g.alive || evo.scores[i] >= target_score { continue; }

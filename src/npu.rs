@@ -1,12 +1,15 @@
 #![cfg(all(target_os = "windows", feature = "npu-directml"))]
 
 use anyhow::{anyhow, Result};
-use ndarray::{Array1, Array2};
-use ort::{environment::Environment, session::SessionBuilder, tensor::OrtOwnedTensor, LoggingLevel, GraphOptimizationLevel};
+use ndarray::{Array2};
+use ort::execution_providers::DirectMLExecutionProvider;
+use ort::logging::LogLevel;
+use ort::session::builder::GraphOptimizationLevel;
+use ort::session::Session;
+use ort::value::TensorRef;
 
 pub struct NpuPolicy {
-    env: Environment,
-    session: ort::Session,
+    session: Session,
     input_name: String,
     output_name: String,
     input_vocab: usize,
@@ -15,19 +18,17 @@ pub struct NpuPolicy {
 
 impl NpuPolicy {
     pub fn load(model_path: &str, input_vocab: usize, actions: usize) -> Result<Self> {
-        let env = Environment::builder()
-            .with_name("snake-npu")
-            .with_log_level(LoggingLevel::Warning)
-            .build()?;
-
-        // Prefer DirectML provider on Windows NPU
-        let session = SessionBuilder::new(&env)?
+        // Build a session preferring DirectML on Windows
+        let session = Session::builder()?
+            .with_log_level(LogLevel::Warning)?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_directml()? // Enable DML Execution Provider
-            .commit(model_path)?;
+            .with_execution_providers([
+                DirectMLExecutionProvider::default().build(),
+            ])?
+            .commit_from_file(model_path)?;
 
-        let inputs = session.inputs();
-        let outputs = session.outputs();
+    let inputs = &session.inputs;
+    let outputs = &session.outputs;
         if inputs.is_empty() || outputs.is_empty() {
             return Err(anyhow!("ONNX model must have at least 1 input and 1 output"));
         }
@@ -35,7 +36,6 @@ impl NpuPolicy {
         let output_name = outputs[0].name.clone();
 
         Ok(Self {
-            env,
             session,
             input_name,
             output_name,
@@ -44,17 +44,17 @@ impl NpuPolicy {
         })
     }
 
-    pub fn select_action(&self, state: u32) -> Result<usize> {
+    pub fn select_action(&mut self, state: u32) -> Result<usize> {
         // We treat the state as a categorical index (embedding should be in the model)
         let idx = (state as usize) % self.input_vocab;
-        let input: Array2<i64> = Array2::from_shape_vec((1, 1), vec![idx as i64])?; // shape [1,1] index
-        let outputs: Vec<OrtOwnedTensor<f32, _>> = self
-            .session
-            .run(ort::inputs!{ self.input_name.clone() => input }?)?;
-        if outputs.is_empty() {
-            return Err(anyhow!("ONNX inference returned no outputs"));
-        }
-        let logits = outputs[0].view();
+        // shape [1, 1] index tensor (int64)
+        let input: Array2<i64> = Array2::from_shape_vec((1, 1), vec![idx as i64])?;
+        let input_tensor = TensorRef::from_array_view(&input)?;
+
+    let outputs = self.session.run(ort::inputs! { self.input_name.as_str() => input_tensor })?;
+
+        // Extract output tensor as ndarray array (f32)
+        let logits = outputs[self.output_name.as_str()].try_extract_array::<f32>()?;
         // Expect [1, actions]
         let row = logits.index_axis(ndarray::Axis(0), 0);
         let mut best = 0usize;

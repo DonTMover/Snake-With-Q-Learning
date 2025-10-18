@@ -1741,6 +1741,7 @@ dependencies = [
  "ndarray",
  "ort-sys",
  "smallvec 2.0.0-alpha.10",
+ "tracing",
 ]
 
 [[package]]
