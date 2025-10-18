@@ -531,7 +531,8 @@ impl EvoTrainer {
     }
 
     /// Reproduce a new generation with elitism, mutation, and adaptive restarts.
-    fn reproduce<R: Rng + ?Sized>(&mut self, rng: &mut R) {
+    /// Returns true if a new global champion was found this epoch.
+    fn reproduce<R: Rng + ?Sized>(&mut self, rng: &mut R) -> bool {
         let mut idxs: Vec<usize> = (0..self.pop_size).collect();
         idxs.sort_by_key(|&i| std::cmp::Reverse(self.scores[i]));
         let best_idx = *idxs.first().unwrap_or(&0);
@@ -755,6 +756,7 @@ impl EvoTrainer {
         self.pop = new_pop;
         self.epoch += 1;
         self.reset_epoch();
+        new_champion
     }
 }
 
@@ -1589,17 +1591,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            // Save DQN weights when DQN is active; JSON save disabled
-            if input.key_pressed(VirtualKeyCode::S) {
-                #[cfg(feature = "dqn-gpu")]
-                if let (true, Some(agent)) = (dqn_mode, dqn_agent.as_ref()) {
-                    if let Err(e) = agent.save_safetensors("dqn_agent.safetensors") {
-                        eprintln!("[DQN] save failed: {}", e);
-                    } else {
-                        println!("[DQN] weights saved to dqn_agent.safetensors");
-                    }
-                }
-            }
+            // S key: save disabled, we now save only when a NEW CHAMPION appears
 
             // Toggle panel visibility
             if input.key_pressed(VirtualKeyCode::H) {
@@ -1706,15 +1698,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     } else {
-                        // On disabling DQN, try to save current weights
-                        #[cfg(feature = "dqn-gpu")]
-                        if let Some(agent) = dqn_agent.as_ref() {
-                            if let Err(e) = agent.save_safetensors("dqn_agent.safetensors") {
-                                eprintln!("[DQN] save on toggle-off failed: {}", e);
-                            } else {
-                                println!("[DQN] weights saved to dqn_agent.safetensors");
-                            }
-                        }
+                        // On disabling DQN, do not save here anymore
                         dqn_agent = None;
                         println!("[DQN] disabled");
                         // Restore default wrap mode when DQN is off
@@ -1800,15 +1784,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         game = Game::new();
                         tick_duration = Duration::from_millis(150);
                     } else if point_in_rect(mx, my, btn_x, btn4_y, btn_w, btn_h) {
-                        // JSON save disabled; if DQN active, save its weights instead
-                        #[cfg(feature = "dqn-gpu")]
-                        if let (true, Some(agent)) = (dqn_mode, dqn_agent.as_ref()) {
-                            if let Err(e) = agent.save_safetensors("dqn_agent.safetensors") {
-                                eprintln!("[DQN] save failed: {}", e);
-                            } else {
-                                println!("[DQN] weights saved to dqn_agent.safetensors");
-                            }
-                        }
+                        // Save button now does nothing (saving happens only on new champion)
                     } else if point_in_rect(mx, my, btn_x, btn5_y, btn_w, btn_h) {
                         panel_visible = false;
                     } else if point_in_rect(mx, my, btn_x, btn6_y, btn_w, btn_h) {
@@ -2079,16 +2055,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ran_steps += 1;
                     if all_done || (evo.steps_taken >= evo.step_limit && !leader_protected) {
                         // All individuals finished or step limit reached - start new epoch
-                        // If DQN is active, checkpoint weights automatically
-                        #[cfg(feature = "dqn-gpu")]
-                        if let (true, Some(agent)) = (dqn_mode, dqn_agent.as_ref()) {
-                            if let Err(e) = agent.save_safetensors("dqn_agent.safetensors") {
-                                eprintln!("[DQN] autosave failed: {}", e);
-                            } else {
-                                println!("[DQN] autosaved weights to dqn_agent.safetensors");
+                        let new_champion = evo.reproduce(&mut rng);
+                        if new_champion {
+                            #[cfg(feature = "dqn-gpu")]
+                            if let (true, Some(agent)) = (dqn_mode, dqn_agent.as_ref()) {
+                                if let Err(e) = agent.save_safetensors("dqn_agent.safetensors") {
+                                    eprintln!("[DQN] save on new champion failed: {}", e);
+                                } else {
+                                    println!("[DQN] saved weights (new champion) to dqn_agent.safetensors");
+                                }
                             }
                         }
-                        evo.reproduce(&mut rng);
                         evo_pending_steps = 0; // reset pending work on epoch change
                         break;
                     }
