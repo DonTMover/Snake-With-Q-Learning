@@ -77,6 +77,8 @@ pub struct DqnAgent {
     pub epsilon: f32,
     pub min_epsilon: f32,
     pub decay: f32,
+    // Hold the parameter map so we can persist weights to .safetensors
+    pub varmap: nn::VarMap,
 }
 
 impl DqnAgent {
@@ -86,7 +88,17 @@ impl DqnAgent {
         let net = DqnNet::new(vb, device, input_vocab, hidden)?;
         // Optimizer over all variables in the model
         let opt = nn::AdamW::new_lr(varmap.all_vars(), 1e-3)?;
-        Ok(Self { net, opt, replay: Replay::new(20000), gamma: 0.99, input_vocab, epsilon: 0.25, min_epsilon: 0.05, decay: 0.999 })
+        Ok(Self {
+            net,
+            opt,
+            replay: Replay::new(20000),
+            gamma: 0.99,
+            input_vocab,
+            epsilon: 0.25,
+            min_epsilon: 0.05,
+            decay: 0.999,
+            varmap,
+        })
     }
 
     pub fn select_action(&self, state: u32) -> candle::Result<usize> {
@@ -139,6 +151,13 @@ impl DqnAgent {
         // Decay exploration a bit each step
         let new_eps = self.epsilon * self.decay;
         self.epsilon = new_eps.max(self.min_epsilon);
+        Ok(())
+    }
+
+    /// Save current model weights to a .safetensors file
+    pub fn save_safetensors(&self, path: &str) -> candle::Result<()> {
+        // VarMap owns all learnable parameters; persist them as safetensors.
+        self.varmap.save_safetensors(path)?;
         Ok(())
     }
 }

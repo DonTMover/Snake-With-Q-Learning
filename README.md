@@ -11,7 +11,8 @@ An interactive Snake game with an optional evolutionary Q-learning trainer. The 
 - On-screen control panel with current score, length, speed, evolution status, epoch charts, and quick action buttons.
 - Q-learning agent with compact, vision-based state encoding (20-bit key) and three actions: turn left, go straight, turn right.
 - Evolutionary trainer (default population 24) running multiple agents in parallel, with elitism, mutation, and adaptive restarts on stagnation. Unique leader protection prevents premature epoch resets.
-- Auto-save and auto-load of the best (champion) agent to/from `snake_agent.json`.
+- [Disabled] Auto-save/load of the tabular Q-learning champion to `snake_agent.json`.
+- DQN (Candle) can save weights to `dqn_agent.safetensors` (press S or toggle J off while DQN is active).
 - GPU-aware training budget: if a GPU adapter is available, a higher steps-per-tick budget is used; toggle via keyboard.
 
 ## Controls
@@ -64,7 +65,7 @@ Run (optimized):
 cargo run --release
 ```
 
-On start, the app tries to load `snake_agent.json`. If found, evolution auto-starts using the loaded agent as a seed.
+Note: JSON auto-load/save of the tabular agent is currently disabled. To persist DQN models, use `.safetensors`.
 
 ## How the learning works
 
@@ -110,7 +111,7 @@ Three discrete actions relative to the current direction:
 - `src/main.rs` — the main application with game logic, rendering, Q-learning agent, and evolutionary trainer.
 - `src/gpu_nn.rs` — experimental NN scaffolding (currently disabled; the `gpu-nn` feature is not wired).
 - `src/npu.rs` — optional NPU (DirectML/ONNX) inference wrapper (Windows only; toggle with K).
-- `snake_agent.json` — saved champion agent (created at runtime when saving).
+- `dqn_agent.safetensors` — saved DQN model weights (created when DQN is active and you press S or toggle J off).
 
 ## Tips
 

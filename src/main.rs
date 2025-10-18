@@ -178,7 +178,7 @@ impl Game {
     /// Advance the game by one tick: move the snake, handle apple/self/wall collisions.
     fn update(&mut self) {
         if !self.alive || self.paused {
-            return;
+            return; // Early exit if the game is not active
         }
 
         // reset death cause at the start of a tick
@@ -565,7 +565,7 @@ impl EvoTrainer {
     }
 
     /// Reproduce a new generation with elitism, mutation, and adaptive restarts.
-    fn reproduce<R: Rng + ?Sized>(&mut self, rng: &mut R, save_path: &str) {
+    fn reproduce<R: Rng + ?Sized>(&mut self, rng: &mut R) {
         let mut idxs: Vec<usize> = (0..self.pop_size).collect();
         idxs.sort_by_key(|&i| std::cmp::Reverse(self.scores[i]));
         let best_idx = *idxs.first().unwrap_or(&0);
@@ -587,12 +587,7 @@ impl EvoTrainer {
                 best_score, self.epoch
             );
 
-            // Auto-save immediately when new champion found
-            if let Err(e) = self.save_best(save_path) {
-                eprintln!("Failed to save champion: {}", e);
-            } else {
-                println!("✅ Champion saved to {}", save_path);
-            }
+            // Auto-save disabled (JSON champion persistence is turned off)
         } else {
             self.epochs_without_improvement += 1;
         }
@@ -1056,21 +1051,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(all(feature = "gpu-nn-experimental", feature = "gpu-nn"))]
     let mut nn_trainer: Option<gpu_nn::GpuTrainer> = Some(gpu_nn::GpuTrainer::new(256, 128, 3));
 
-    // Try to load saved agent and auto-start training if found
-    let save_path = "snake_agent.json";
-    let agent_loaded = if let Err(e) = evo.load_best(save_path) {
-        eprintln!("Could not load saved agent: {}", e);
-        false
-    } else {
-        println!("✅ Loaded saved agent from {}", save_path);
-        true
-    };
-
-    // Auto-start evolution if agent was loaded
-    if agent_loaded {
-        evo.training = true;
-        println!("🚀 Auto-starting evolution with loaded agent");
-    }
+    // JSON champion auto-load/save disabled per request.
+    // let save_path = "snake_agent.json";
+    // let agent_loaded = if let Err(e) = evo.load_best(save_path) {
+    //     eprintln!("Could not load saved agent: {}", e);
+    //     false
+    // } else {
+    //     println!("✅ Loaded saved agent from {}", save_path);
+    //     true
+    // };
+    // if agent_loaded {
+    //     evo.training = true;
+    //     println!("🚀 Auto-starting evolution with loaded agent");
+    // }
 
     // If CUDA is available, auto-enable DQN and start evolution
     #[cfg(all(feature = "dqn-gpu", feature = "dqn-gpu-cuda"))]
@@ -1622,12 +1615,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            // Save agent
+            // Save DQN weights when DQN is active; JSON save disabled
             if input.key_pressed(VirtualKeyCode::S) {
-                if let Err(e) = evo.save_best(save_path) {
-                    eprintln!("Failed to save agent: {}", e);
-                } else {
-                    println!("Agent saved to {}", save_path);
+                #[cfg(feature = "dqn-gpu")]
+                if let (true, Some(agent)) = (dqn_mode, dqn_agent.as_ref()) {
+                    if let Err(e) = agent.save_safetensors("dqn_agent.safetensors") {
+                        eprintln!("[DQN] save failed: {}", e);
+                    } else {
+                        println!("[DQN] weights saved to dqn_agent.safetensors");
+                    }
                 }
             }
 
@@ -1728,6 +1724,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     } else {
+                        // On disabling DQN, try to save current weights
+                        #[cfg(feature = "dqn-gpu")]
+                        if let Some(agent) = dqn_agent.as_ref() {
+                            if let Err(e) = agent.save_safetensors("dqn_agent.safetensors") {
+                                eprintln!("[DQN] save on toggle-off failed: {}", e);
+                            } else {
+                                println!("[DQN] weights saved to dqn_agent.safetensors");
+                            }
+                        }
                         dqn_agent = None;
                         println!("[DQN] disabled");
                         // Restore default wrap mode when DQN is off
@@ -2088,7 +2093,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ran_steps += 1;
                     if all_done || (evo.steps_taken >= evo.step_limit && !leader_protected) {
                         // All individuals finished or step limit reached - start new epoch
-                        evo.reproduce(&mut rng, save_path);
+                        evo.reproduce(&mut rng);
                         evo_pending_steps = 0; // reset pending work on epoch change
                         break;
                     }
@@ -2494,7 +2499,6 @@ fn draw_chart(frame: &mut [u8], x: u32, y: u32, w: u32, h: u32, data: &[usize]) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn test_dir_rotation() {
@@ -2549,10 +2553,7 @@ mod tests {
         // Ensure there is a champion by setting a non-zero best score
         evo.scores[0] = 1;
         let mut rng = SmallRng::from_entropy();
-        let mut p: PathBuf = std::env::temp_dir();
-        p.push("snake_agent_test.json");
-        let save_path = p.to_string_lossy().to_string();
-        evo.reproduce(&mut rng, &save_path);
+        evo.reproduce(&mut rng);
         assert_eq!(evo.pop.len(), evo.pop_size);
         assert_eq!(evo.games.len(), evo.pop_size);
         assert_eq!(evo.scores.len(), evo.pop_size);
