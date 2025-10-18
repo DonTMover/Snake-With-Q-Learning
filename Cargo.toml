@@ -5,10 +5,9 @@ edition = "2024"
 license = "MIT"
 
 [features]
-# GPU NN UI scaffolding only (safe): does not include heavy deps
+# Placeholder features to silence cfgs in code (no deps wired)
 gpu-nn = []
-# Experimental GPU NN backend (burn/wgpu): may require newer toolchain/deps
-gpu-nn-experimental = ["dep:burn", "dep:burn-wgpu"]
+gpu-nn-experimental = []
 # DQN with Candle on GPU (CUDA) or CPU
 dqn-gpu = ["dep:candle-core", "dep:candle-nn"]
 # Enable CUDA backend for Candle (requires NVIDIA CUDA Toolkit & NVCC)
@@ -25,7 +24,6 @@ winit_input_helper = "0.14"
 rand = { version = "0.8", features = ["small_rng"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-bincode = { version = "2.0.0-rc.3", features = ["serde"] }
 ahash = { version = "0.8", features = ["serde"] }
 rayon = "1.10"
 wgpu = "0.16"
@@ -34,9 +32,7 @@ bytemuck = { version = "1.14", features = ["derive"] }
 anyhow = "1.0"
 ndarray = { version = "0.16", optional = true, features = ["std"] }
 
-# Optional: GPU NN backend (disabled by default)
-burn = { version = "0.14", optional = true, default-features = false }
-burn-wgpu = { version = "0.14", optional = true, default-features = false }
+## (Removed) burn/burn-wgpu experimental deps
 
 # Candle (Rust DL) optional deps for DQN
 candle-core = { version = "0.8", optional = true, default-features = false }

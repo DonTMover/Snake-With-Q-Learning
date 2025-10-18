@@ -26,9 +26,11 @@ An interactive Snake game with an optional evolutionary Q-learning trainer. The 
 - Save best agent: S
 - Toggle panel visibility: H
 - Toggle acceleration budget (CPU/GPU): G (only shown if a GPU is available)
+- Toggle DQN (Candle) policy/training: J (requires Evolution E; uses solid walls, no wrap)
+- Toggle NPU (DirectML, ONNX) inference: K (requires Evolution E; expects snake_dqn.onnx)
 - Ultra-fast training (skip rendering, raise budget): U
 - Show only best agent during training: B
-- If built with feature `gpu-nn`: toggle experimental NN mode with N
+- Deprecated: `gpu-nn` experimental NN scaffolding is currently disabled and not wired into the build.
 - Quit: Esc or close window
 - Mouse: Click panel buttons (Pause/Resume, Speed+, Restart, Save, Hide/Show)
 
@@ -94,7 +96,8 @@ Three discrete actions relative to the current direction:
 ## Code structure
 
 - `src/main.rs` — the main application with game logic, rendering, Q-learning agent, and evolutionary trainer.
-- `src/gpu_nn.rs` — optional experimental NN scaffolding (behind the `gpu-nn` feature).
+- `src/gpu_nn.rs` — experimental NN scaffolding (currently disabled; the `gpu-nn` feature is not wired).
+- `src/npu.rs` — optional NPU (DirectML/ONNX) inference wrapper (Windows only; toggle with K).
 - `snake_agent.json` — saved champion agent (created at runtime when saving).
 
 ## Tips
@@ -102,6 +105,7 @@ Three discrete actions relative to the current direction:
 - To start training from scratch, delete `snake_agent.json` or press E to toggle training and let evolution run.
 - At very high training speeds, frames are skipped and drawing can be disabled to maximize throughput.
 - Grid/cell sizes are constants near the top of `main.rs` and can be adjusted as needed.
+- G only adjusts the step budget; it does not enable GPU/NPU compute. Use J for DQN and K for NPU.
 
 ## License
 

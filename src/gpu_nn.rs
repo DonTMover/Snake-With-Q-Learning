@@ -1,10 +1,15 @@
 #![cfg(feature = "gpu-nn")]
 
-use burn::backend::Autodiff;
-use burn::backend::wgpu::{AutoGraphicsApi, Wgpu, WgpuDevice};
-use burn::module::Module;
-use burn::nn::{Linear, LinearConfig, Relu};
-use burn::tensor::{Tensor, activation::softmax};
+// The experimental gpu-nn scaffolding has been disabled and its dependencies were removed.
+// If you see this error, please remove the `gpu-nn` feature from your build.
+compile_error!("The 'gpu-nn' scaffolding is currently disabled. Do not enable the 'gpu-nn' feature.");
+
+// Disabled code below remains for reference; it requires the Burn crates.
+// use burn::backend::Autodiff;
+// use burn::backend::wgpu::{AutoGraphicsApi, Wgpu, WgpuDevice};
+// use burn::module::Module;
+// use burn::nn::{Linear, LinearConfig, Relu};
+// use burn::tensor::{Tensor, activation::softmax};
 
 type B = Autodiff<Wgpu<AutoGraphicsApi, f32, i32>>;
 
