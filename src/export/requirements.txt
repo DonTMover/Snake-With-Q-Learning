@@ -1,0 +1,4 @@
+torch>=2.1
+safetensors>=0.4
+onnx>=1.14
+onnxruntime>=1.16

@@ -43,30 +43,43 @@ use winit::event::{Event, VirtualKeyCode};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::WindowBuilder;
 use winit_input_helper::WinitInputHelper;
-// Helper to locate the ONNX model for NPU mode on Windows
+// Helper to locate the model file for NPU mode on Windows (.onnx or .ort)
 #[cfg(all(target_os = "windows", feature = "npu-directml"))]
-fn find_npu_onnx_model() -> Option<String> {
+fn find_npu_model() -> Option<String> {
     use std::env;
-    use std::path::Path;
-
-    if let Ok(p) = env::var("SNAKE_NPU_ONNX") {
+    // Prefer generic env var, keep backward compatibility
+    if let Ok(p) = env::var("SNAKE_NPU_MODEL")
+        .or_else(|_| env::var("SNAKE_NPU_ONNX"))
+    {
         if std::path::Path::new(&p).exists() {
             return Some(p);
         }
     }
 
     let candidates = [
+        // ONNX
         "snake_dqn.onnx",
         "models/snake_dqn.onnx",
         "assets/snake_dqn.onnx",
         "target/release/snake_dqn.onnx",
         "target/debug/snake_dqn.onnx",
+        // ORT optimized format
+        "snake_dqn.ort",
+        "models/snake_dqn.ort",
+        "assets/snake_dqn.ort",
+        "target/release/snake_dqn.ort",
+        "target/debug/snake_dqn.ort",
     ];
-    for c in candidates { if std::path::Path::new(c).exists() { return Some(c.to_string()); } }
+    for c in candidates {
+        if std::path::Path::new(c).exists() {
+            return Some(c.to_string());
+        }
+    }
     None
 }
 
 /// Read usize from env var or return default on parse error/missing.
+#[cfg_attr(not(feature = "dqn-gpu"), allow(dead_code))]
 fn env_usize(var: &str, default: usize) -> usize {
     std::env::var(var)
         .ok()
@@ -1224,19 +1237,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let panel_x: u32 = 8;
                 let panel_y: u32 = 8;
                 let panel_w: u32 = 380; // increased from 280
-                let panel_h: u32 = 628; // increased to fit new button line
+                let panel_h: u32 = 780; // increased to fit more buttons
                 let btn_h: u32 = 32; // increased button height
                 let btn_w: u32 = panel_w - 16;
                 let btn_x: u32 = panel_x + 8;
                 // Chart area inside panel (positioned below HUD option lines)
-                let chart_y: u32 = panel_y + 340; // moved further down to avoid text overlap
+                let chart_y: u32 = panel_y + 340; // keep in sync with mouse handler
                 let chart_h: u32 = 120; // increased chart height
                 let btn1_y: u32 = chart_y + chart_h + 8; // start buttons after chart
                 let btn2_y: u32 = btn1_y + btn_h + 6;
                 let btn3_y: u32 = btn2_y + btn_h + 6;
                 let btn4_y: u32 = btn3_y + btn_h + 6;
-                let btn5_y: u32 = btn4_y + btn_h + 6; // hide button
-                let btn6_y: u32 = btn5_y + btn_h + 6; // show-only-best button
+                let btn5_y: u32 = btn4_y + btn_h + 6; // hide panel
+                let btn6_y: u32 = btn5_y + btn_h + 6; // show-only-best
+                let btn7_y: u32 = btn6_y + btn_h + 10; // speed-
+                let btn8_y: u32 = btn7_y + btn_h + 6; // evo toggle
+                let btn9_y: u32 = btn8_y + btn_h + 6; // ultra toggle
+                let btn10_y: u32 = btn9_y + btn_h + 6; // accel toggle
+                #[cfg(feature = "dqn-gpu")]
+                let btn11_y: u32 = btn10_y + btn_h + 6; // dqn toggle
+                #[cfg(all(target_os = "windows", feature = "npu-directml"))]
+                let btn12_y: u32 = {
+                    #[cfg(feature = "dqn-gpu")]
+                    { btn11_y + btn_h + 6 }
+                    #[cfg(not(feature = "dqn-gpu"))]
+                    { btn10_y + btn_h + 6 }
+                }; // npu toggle
 
                 fill_rect_rgba(frame, panel_x, panel_y, panel_w, panel_h, 0, 0, 0, 140);
                 stroke_rect_rgba(frame, panel_x, panel_y, panel_w, panel_h, 255, 255, 255, 60);
@@ -1452,6 +1478,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "BEST OFF B"
                 };
                 draw_button(frame, btn_x, btn6_y, btn_w, btn_h, best_label);
+                // Extra controls
+                draw_button(frame, btn_x, btn7_y, btn_w, btn_h, "SPEED-  -");
+                let evo_label = if evo.training { "EVO ON  E" } else { "EVO OFF E" };
+                draw_button(frame, btn_x, btn8_y, btn_w, btn_h, evo_label);
+                let ultra_label = if ultra_fast { "ULTRA ON U" } else { "ULTRA OFF U" };
+                draw_button(frame, btn_x, btn9_y, btn_w, btn_h, ultra_label);
+                let accel_label = if gpu_enabled { "ACCEL GPU G" } else if gpu_available { "ACCEL AV  G" } else { "ACCEL CPU G" };
+                draw_button(frame, btn_x, btn10_y, btn_w, btn_h, accel_label);
+                #[cfg(feature = "dqn-gpu")]
+                {
+                    let dqn_label = if dqn_mode { "DQN ON  J" } else { "DQN OFF J" };
+                    draw_button(frame, btn_x, btn11_y, btn_w, btn_h, dqn_label);
+                }
+                #[cfg(all(target_os = "windows", feature = "npu-directml"))]
+                {
+                    let npu_label = if npu_mode { "NPU ON  K" } else { "NPU OFF K" };
+                    draw_button(frame, btn_x, btn12_y, btn_w, btn_h, npu_label);
+                }
             } else {
                 // Draw small button to show panel again
                 #[cfg(not(feature = "gpu-render"))]
@@ -1635,10 +1679,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if input.key_pressed(VirtualKeyCode::K) {
                     npu_mode = !npu_mode;
                     if npu_mode {
-                        let Some(model_path) = find_npu_onnx_model() else {
+                        let Some(model_path) = find_npu_model() else {
                             npu_mode = false;
                             eprintln!(
-                                "[NPU] ONNX model not found. Provide it via:\n  - Env var SNAKE_NPU_ONNX=<path-to-onnx>\n  - Or place 'snake_dqn.onnx' in one of: ./, models/, assets/, target/(debug|release)/"
+                                "[NPU] Model not found. Provide it via:\n  - Env var SNAKE_NPU_MODEL=<path-to-(.onnx|.ort)> (or legacy SNAKE_NPU_ONNX)\n  - Or place 'snake_dqn.(onnx|ort)' in one of: ./, models/, assets/, target/(debug|release)/"
                             );
                             // do not attempt to load
                             return;
@@ -1783,7 +1827,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let btn_h: u32 = 32;
                     let btn_w: u32 = panel_w - 16;
                     let btn_x: u32 = panel_x + 8;
-                    let chart_y: u32 = panel_y + 310;
+                    let chart_y: u32 = panel_y + 340; // aligned with draw section
                     let chart_h: u32 = 120;
                     let btn1_y: u32 = chart_y + chart_h + 8;
                     let btn2_y: u32 = btn1_y + btn_h + 6;
@@ -1791,6 +1835,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let btn4_y: u32 = btn3_y + btn_h + 6;
                     let btn5_y: u32 = btn4_y + btn_h + 6;
                     let btn6_y: u32 = btn5_y + btn_h + 6;
+                    let btn7_y: u32 = btn6_y + btn_h + 10;
+                    let btn8_y: u32 = btn7_y + btn_h + 6;
+                    let btn9_y: u32 = btn8_y + btn_h + 6;
+                    let btn10_y: u32 = btn9_y + btn_h + 6;
+                    let btn11_y: u32 = btn10_y + btn_h + 6;
+                    let btn12_y: u32 = btn11_y + btn_h + 6;
                     if point_in_rect(mx, my, btn_x, btn1_y, btn_w, btn_h) {
                         game.paused = !game.paused;
                     } else if point_in_rect(mx, my, btn_x, btn2_y, btn_w, btn_h) {
@@ -1811,6 +1861,107 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         panel_visible = false;
                     } else if point_in_rect(mx, my, btn_x, btn6_y, btn_w, btn_h) {
                         show_only_best = !show_only_best;
+                    } else if point_in_rect(mx, my, btn_x, btn7_y, btn_w, btn_h) {
+                        if evo.training {
+                            evo_steps_per_frame = (evo_steps_per_frame / 2).max(1);
+                        } else {
+                            manual_speed_delta_ms = (manual_speed_delta_ms + 10).min(300);
+                        }
+                    } else if point_in_rect(mx, my, btn_x, btn8_y, btn_w, btn_h) {
+                        // Toggle Evolution (same as E)
+                        evo.training = !evo.training;
+                        if evo.training {
+                            evo.solved = false;
+                            evo.reset_epoch();
+                            evo.epoch = 0;
+                            evo.epoch_best.clear();
+                            evo.best_score = 0;
+                            evo.epochs_without_improvement = 0;
+                            game = Game::new();
+                        }
+                    } else if point_in_rect(mx, my, btn_x, btn9_y, btn_w, btn_h) {
+                        // Toggle Ultra
+                        ultra_fast = !ultra_fast;
+                        max_steps_per_tick = if ultra_fast { 50_000 } else { 1500 };
+                    } else if point_in_rect(mx, my, btn_x, btn10_y, btn_w, btn_h) {
+                        // Toggle Accel budget (G)
+                        if gpu_available {
+                            gpu_enabled = !gpu_enabled;
+                            max_steps_per_tick = if gpu_enabled { 80_000 } else if ultra_fast { 50_000 } else { 1500 };
+                            println!("[hint] G toggles step budget only (not GPU learning). Use J to toggle DQN, and E to start training.");
+                        }
+                    } else if point_in_rect(mx, my, btn_x, btn11_y, btn_w, btn_h) {
+                        #[cfg(feature = "dqn-gpu")]
+                        {
+                            dqn_mode = !dqn_mode;
+                            if dqn_mode {
+                                let dev = dqn::preferred_device();
+                                let dev_print = format!("{:?}", dev);
+                                let vocab = env_usize("SNAKE_DQN_VOCAB", 1024);
+                                let hidden = env_usize("SNAKE_DQN_HIDDEN", 256);
+                                dqn_train_batch = env_usize("SNAKE_DQN_BATCH", dqn_train_batch.max(1));
+                                match dqn::DqnAgent::new(vocab, hidden, &dev) {
+                                    Ok(mut agent) => {
+                                        let wt = std::path::Path::new("dqn_agent.safetensors");
+                                        if wt.exists() {
+                                            match agent.load_safetensors("dqn_agent.safetensors") {
+                                                Ok(_) => println!("[DQN] loaded weights from dqn_agent.safetensors"),
+                                                Err(e) => eprintln!("[DQN] failed to load weights: {}", e),
+                                            }
+                                        }
+                                        dqn_agent = Some(agent);
+                                        println!(
+                                            "[DQN] enabled (device: {}) | vocab={} hidden={} batch={}",
+                                            dev_print, vocab, hidden, dqn_train_batch
+                                        );
+                                        evo.set_wrap_world(false);
+                                        println!("[DQN] using solid walls (no wrap) for training");
+                                        if !evo.training {
+                                            println!("[hint] DQN is active only during Evolution. Press E to start training.");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        dqn_mode = false;
+                                        eprintln!("[DQN] init failed: {}", e);
+                                    }
+                                }
+                            } else {
+                                dqn_agent = None;
+                                println!("[DQN] disabled");
+                                evo.set_wrap_world(true);
+                            }
+                        }
+                    } else if point_in_rect(mx, my, btn_x, btn12_y, btn_w, btn_h) {
+                        #[cfg(all(target_os = "windows", feature = "npu-directml"))]
+                        {
+                            npu_mode = !npu_mode;
+                            if npu_mode {
+                                let Some(model_path) = find_npu_model() else {
+                                    npu_mode = false;
+                                    eprintln!(
+                                        "[NPU] Model not found. Provide it via:\n  - Env var SNAKE_NPU_MODEL=<path-to-(.onnx|.ort)> (or legacy SNAKE_NPU_ONNX)\n  - Or place 'snake_dqn.(onnx|ort)' in one of: ./, models/, assets/, target/(debug|release)/"
+                                    );
+                                    return;
+                                };
+                                match npu::NpuPolicy::load(&model_path, 1024, 3) {
+                                    Ok(p) => {
+                                        npu_policy = Some(p);
+                                        println!("[NPU] DirectML policy loaded (ONNX): {}", model_path);
+                                        if !evo.training {
+                                            println!("[hint] NPU policy is used during Evolution (E). Press E to start training.");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        npu_mode = false;
+                                        eprintln!("[NPU] failed to load ONNX model: {}", e);
+                                        eprintln!("       Set SNAKE_NPU_ONNX or place the model at a supported path.");
+                                    }
+                                }
+                            } else {
+                                npu_policy = None;
+                                println!("[NPU] disabled");
+                            }
+                        }
                     }
                 } else {
                     // Check if clicked on show button
