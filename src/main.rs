@@ -66,6 +66,14 @@ fn find_npu_onnx_model() -> Option<String> {
     None
 }
 
+/// Read usize from env var or return default on parse error/missing.
+fn env_usize(var: &str, default: usize) -> usize {
+    std::env::var(var)
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
 #[cfg(feature = "gpu-render")]
 mod gpu_render;
 
@@ -1013,6 +1021,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut dqn_mode: bool = false; // toggle DQN training
     #[cfg(feature = "dqn-gpu")]
     let mut dqn_agent: Option<dqn::DqnAgent> = None;
+    #[cfg(feature = "dqn-gpu")]
+    let mut dqn_train_batch: usize = env_usize("SNAKE_DQN_BATCH", 256);
     #[cfg(all(target_os = "windows", feature = "npu-directml"))]
     let mut npu_mode: bool = false; // toggle NPU inference
     #[cfg(all(target_os = "windows", feature = "npu-directml"))]
@@ -1039,7 +1049,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         if let Ok(cuda_dev) = candle_core::Device::new_cuda(0) {
             // Initialize DQN agent on CUDA
-            match dqn::DqnAgent::new(1024, 256, &cuda_dev) {
+            let vocab = env_usize("SNAKE_DQN_VOCAB", 1024);
+            let hidden = env_usize("SNAKE_DQN_HIDDEN", 256);
+            match dqn::DqnAgent::new(vocab, hidden, &cuda_dev) {
                 Ok(mut agent) => {
                     // Try to load previous weights
                     let wt = std::path::Path::new("dqn_agent.safetensors");
@@ -1053,7 +1065,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     {
                         dqn_mode = true;
                         dqn_agent = Some(agent);
-                        println!("[DQN] auto-enabled (device: Cuda(0))");
+                        println!(
+                            "[DQN] auto-enabled (device: Cuda(0)) | vocab={} hidden={} batch={}",
+                            vocab, hidden, dqn_train_batch
+                        );
                         // Prefer solid walls for DQN training
                         evo.set_wrap_world(false);
                         println!("[DQN] using solid walls (no wrap) for training");
@@ -1673,7 +1688,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if dqn_mode {
                         let dev = dqn::preferred_device();
                         let dev_print = format!("{:?}", dev);
-                        match dqn::DqnAgent::new(1024, 256, &dev) {
+                        let vocab = env_usize("SNAKE_DQN_VOCAB", 1024);
+                        let hidden = env_usize("SNAKE_DQN_HIDDEN", 256);
+                        dqn_train_batch = env_usize("SNAKE_DQN_BATCH", dqn_train_batch.max(1));
+                        match dqn::DqnAgent::new(vocab, hidden, &dev) {
                             Ok(mut agent) => {
                                 // Try to load previous weights if present
                                 let wt = std::path::Path::new("dqn_agent.safetensors");
@@ -1684,7 +1702,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                                 dqn_agent = Some(agent);
-                                println!("[DQN] enabled (device: {})", dev_print);
+                                println!(
+                                    "[DQN] enabled (device: {}) | vocab={} hidden={} batch={}",
+                                    dev_print, vocab, hidden, dqn_train_batch
+                                );
                                 evo.set_wrap_world(false);
                                 println!("[DQN] using solid walls (no wrap) for training");
                                 if !evo.training {
@@ -1962,7 +1983,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 agent.push_transition(s, a_idx, reward, ns, died || !g.alive);
                                 if g.alive { evo.scores[i] = g.score; }
                             }
-                            let _ = agent.train_step(256);
+                            let _ = agent.train_step(dqn_train_batch);
                         }
                         if evo.scores.iter().zip(evo.games.iter()).any(|(s, g)| g.alive && *s < target_score) {
                             all_done = false;
