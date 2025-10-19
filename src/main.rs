@@ -33,8 +33,8 @@ use rand::rngs::SmallRng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
-use std::fs;
-use std::path::Path;
+// use std::fs; // not used currently
+// Path is only used within optional DQN feature blocks; use fully-qualified paths there.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use wgpu::{Backends, Instance, PowerPreference};
@@ -50,7 +50,7 @@ fn find_npu_onnx_model() -> Option<String> {
     use std::path::Path;
 
     if let Ok(p) = env::var("SNAKE_NPU_ONNX") {
-        if Path::new(&p).exists() {
+        if std::path::Path::new(&p).exists() {
             return Some(p);
         }
     }
@@ -62,7 +62,7 @@ fn find_npu_onnx_model() -> Option<String> {
         "target/release/snake_dqn.onnx",
         "target/debug/snake_dqn.onnx",
     ];
-    for c in candidates { if Path::new(c).exists() { return Some(c.to_string()); } }
+    for c in candidates { if std::path::Path::new(c).exists() { return Some(c.to_string()); } }
     None
 }
 
@@ -525,6 +525,7 @@ impl EvoTrainer {
     }
 
     /// Set wrapping mode and reinitialize all games with the chosen behavior.
+    #[cfg_attr(not(any(feature = "dqn-gpu")), allow(dead_code))]
     fn set_wrap_world(&mut self, wrap: bool) {
         self.wrap_world = wrap;
         self.reset_epoch();
@@ -1041,7 +1042,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match dqn::DqnAgent::new(1024, 256, &cuda_dev) {
                 Ok(mut agent) => {
                     // Try to load previous weights
-                    let wt = Path::new("dqn_agent.safetensors");
+                    let wt = std::path::Path::new("dqn_agent.safetensors");
                     if wt.exists() {
                         match agent.load_safetensors("dqn_agent.safetensors") {
                             Ok(_) => println!("[DQN] loaded weights from dqn_agent.safetensors"),
@@ -1675,7 +1676,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         match dqn::DqnAgent::new(1024, 256, &dev) {
                             Ok(mut agent) => {
                                 // Try to load previous weights if present
-                                let wt = Path::new("dqn_agent.safetensors");
+                                let wt = std::path::Path::new("dqn_agent.safetensors");
                                 if wt.exists() {
                                     match agent.load_safetensors("dqn_agent.safetensors") {
                                         Ok(_) => println!("[DQN] loaded weights from dqn_agent.safetensors"),
