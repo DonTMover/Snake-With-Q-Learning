@@ -593,9 +593,9 @@ impl EvoTrainer {
 
         let mut new_pop: Vec<QAgent> = Vec::with_capacity(self.pop_size);
 
-        // Adaptive stagnation threshold: increase after each restart to give more time
-        let base_threshold = 1000;
-        let stagnation_threshold = base_threshold + (self.restart_count * 500);
+    // Adaptive stagnation threshold (reduced): base ~80 epochs, +20 per restart
+    let base_threshold = 80;
+    let stagnation_threshold = base_threshold + (self.restart_count * 20);
 
         // Check for long stagnation
         if self.epochs_without_improvement >= stagnation_threshold && self.champion.is_some() {
@@ -1435,8 +1435,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Stagnation warning
                 if evo.epochs_without_improvement > 0 {
-                    let base_threshold = 1000 + (evo.restart_count * 500);
-                    let color = if evo.epochs_without_improvement > (base_threshold - 200) {
+                    let base_threshold = 80 + (evo.restart_count * 20);
+                    let color = if evo.epochs_without_improvement > (base_threshold.saturating_sub(20)) {
                         (255, 100, 100, 255)
                     } else {
                         (200, 200, 200, 255)
