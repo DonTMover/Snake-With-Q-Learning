@@ -87,6 +87,16 @@ fn env_usize(var: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+// Build a DQN checkpoint path that encodes model dimensions and device tag.
+// Can be overridden by the env var SNAKE_DQN_CKPT with an explicit filename.
+#[cfg(feature = "dqn-gpu")]
+fn dqn_ckpt_path(vocab: usize, hidden: usize, dev_tag: &str) -> String {
+    if let Ok(p) = std::env::var("SNAKE_DQN_CKPT") {
+        return p;
+    }
+    format!("dqn_v{}_h{}_{}.safetensors", vocab, hidden, dev_tag)
+}
+
 #[cfg(feature = "gpu-render")]
 mod gpu_render;
 
@@ -1064,14 +1074,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Initialize DQN agent on CUDA
             let vocab = env_usize("SNAKE_DQN_VOCAB", 1024);
             let hidden = env_usize("SNAKE_DQN_HIDDEN", 256);
+            let dev_tag = "cuda0";
             match dqn::DqnAgent::new(vocab, hidden, &cuda_dev) {
                 Ok(mut agent) => {
-                    // Try to load previous weights
-                    let wt = std::path::Path::new("dqn_agent.safetensors");
-                    if wt.exists() {
-                        match agent.load_safetensors("dqn_agent.safetensors") {
-                            Ok(_) => println!("[DQN] loaded weights from dqn_agent.safetensors"),
-                            Err(e) => eprintln!("[DQN] failed to load weights: {}", e),
+                    // Try to load previous weights: prefer arch-specific, fallback to legacy
+                    let ckpt = dqn_ckpt_path(vocab, hidden, dev_tag);
+                    let try_files = [ckpt.as_str(), "dqn_agent.safetensors"];
+                    for path in try_files.iter() {
+                        let wt = std::path::Path::new(path);
+                        if wt.exists() {
+                            match agent.load_safetensors(path) {
+                                Ok(_) => {
+                                    println!("[DQN] loaded weights from {}", path);
+                                    break;
+                                }
+                                Err(e) => {
+                                    eprintln!("[DQN] warning: failed to load '{}': {}", path, e);
+                                    // Continue to next candidate; non-fatal (e.g., shape mismatch)
+                                }
+                            }
                         }
                     }
                     #[cfg(feature = "dqn-gpu")]
@@ -1079,8 +1100,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         dqn_mode = true;
                         dqn_agent = Some(agent);
                         println!(
-                            "[DQN] auto-enabled (device: Cuda(0)) | vocab={} hidden={} batch={}",
-                            vocab, hidden, dqn_train_batch
+                            "[DQN] auto-enabled (device: Cuda(0)) | vocab={} hidden={} batch={} (ckpt: {})",
+                            vocab, hidden, dqn_train_batch, dqn_ckpt_path(vocab, hidden, dev_tag)
                         );
                         // Prefer solid walls for DQN training
                         evo.set_wrap_world(false);
@@ -1737,18 +1758,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         dqn_train_batch = env_usize("SNAKE_DQN_BATCH", dqn_train_batch.max(1));
                         match dqn::DqnAgent::new(vocab, hidden, &dev) {
                             Ok(mut agent) => {
-                                // Try to load previous weights if present
-                                let wt = std::path::Path::new("dqn_agent.safetensors");
-                                if wt.exists() {
-                                    match agent.load_safetensors("dqn_agent.safetensors") {
-                                        Ok(_) => println!("[DQN] loaded weights from dqn_agent.safetensors"),
-                                        Err(e) => eprintln!("[DQN] failed to load weights: {}", e),
+                                // Try to load previous weights: prefer arch-specific, fallback to legacy
+                                let dev_tag = if dev_print.contains("Cuda") { "cuda0" } else { "cpu" };
+                                let ckpt = dqn_ckpt_path(vocab, hidden, dev_tag);
+                                let try_files = [ckpt.as_str(), "dqn_agent.safetensors"];
+                                for path in try_files.iter() {
+                                    let wt = std::path::Path::new(path);
+                                    if wt.exists() {
+                                        match agent.load_safetensors(path) {
+                                            Ok(_) => { println!("[DQN] loaded weights from {}", path); break; }
+                                            Err(e) => eprintln!("[DQN] warning: failed to load '{}': {}", path, e),
+                                        }
                                     }
                                 }
                                 dqn_agent = Some(agent);
                                 println!(
-                                    "[DQN] enabled (device: {}) | vocab={} hidden={} batch={}",
-                                    dev_print, vocab, hidden, dqn_train_batch
+                                    "[DQN] enabled (device: {}) | vocab={} hidden={} batch={} (ckpt: {})",
+                                    dev_print, vocab, hidden, dqn_train_batch, ckpt
                                 );
                                 evo.set_wrap_world(false);
                                 println!("[DQN] using solid walls (no wrap) for training");
@@ -1902,17 +1928,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 dqn_train_batch = env_usize("SNAKE_DQN_BATCH", dqn_train_batch.max(1));
                                 match dqn::DqnAgent::new(vocab, hidden, &dev) {
                                     Ok(mut agent) => {
-                                        let wt = std::path::Path::new("dqn_agent.safetensors");
-                                        if wt.exists() {
-                                            match agent.load_safetensors("dqn_agent.safetensors") {
-                                                Ok(_) => println!("[DQN] loaded weights from dqn_agent.safetensors"),
-                                                Err(e) => eprintln!("[DQN] failed to load weights: {}", e),
+                                        let dev_tag = if dev_print.contains("Cuda") { "cuda0" } else { "cpu" };
+                                        let ckpt = dqn_ckpt_path(vocab, hidden, dev_tag);
+                                        let try_files = [ckpt.as_str(), "dqn_agent.safetensors"];
+                                        for path in try_files.iter() {
+                                            let wt = std::path::Path::new(path);
+                                            if wt.exists() {
+                                                match agent.load_safetensors(path) {
+                                                    Ok(_) => { println!("[DQN] loaded weights from {}", path); break; }
+                                                    Err(e) => eprintln!("[DQN] warning: failed to load '{}': {}", path, e),
+                                                }
                                             }
                                         }
                                         dqn_agent = Some(agent);
                                         println!(
-                                            "[DQN] enabled (device: {}) | vocab={} hidden={} batch={}",
-                                            dev_print, vocab, hidden, dqn_train_batch
+                                            "[DQN] enabled (device: {}) | vocab={} hidden={} batch={} (ckpt: {})",
+                                            dev_print, vocab, hidden, dqn_train_batch, ckpt
                                         );
                                         evo.set_wrap_world(false);
                                         println!("[DQN] using solid walls (no wrap) for training");
@@ -2232,10 +2263,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if new_champion {
                             #[cfg(feature = "dqn-gpu")]
                             if let (true, Some(agent)) = (dqn_mode, dqn_agent.as_ref()) {
-                                if let Err(e) = agent.save_safetensors("dqn_agent.safetensors") {
+                                // Try to infer last used architecture via env (safe, matches runtime)
+                                let vocab = env_usize("SNAKE_DQN_VOCAB", 1024);
+                                let hidden = env_usize("SNAKE_DQN_HIDDEN", 256);
+                                // We don't know device print here reliably; use cuda0 if CUDA feature is on
+                                #[cfg(feature = "dqn-gpu-cuda")]
+                                let dev_tag = "cuda0";
+                                #[cfg(not(feature = "dqn-gpu-cuda"))]
+                                let dev_tag = "cpu";
+                                let ckpt = dqn_ckpt_path(vocab, hidden, dev_tag);
+                                if let Err(e) = agent.save_safetensors(&ckpt) {
                                     eprintln!("[DQN] save on new champion failed: {}", e);
                                 } else {
-                                    println!("[DQN] saved weights (new champion) to dqn_agent.safetensors");
+                                    println!("[DQN] saved weights (new champion) to {}", ckpt);
                                 }
                             }
                         }
